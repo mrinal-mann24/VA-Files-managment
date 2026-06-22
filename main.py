@@ -119,7 +119,7 @@ async def webhook(request: Request):
             # Auto-add their number to client_contacts so next time they're
             # recognised immediately without hitting Step 2 again.
             print(f"[main] New number '{sender_phone}' in known group — auto-adding to contacts.")
-            db.add_contact(client["client_id"], sender_phone)
+            db.add_contact(client["client_id"], sender_phone, client["client_name"])
         else:
             # ------------------------------------------------------------------ #
             # Step 3 — unknown group: check if group name contains "<> VA" or    #
@@ -128,7 +128,7 @@ async def webhook(request: Request):
             client = db.find_client_by_group_members(chat_id)
             if client:
                 print(f"[main] Auto-mapped group '{chat_id}' to '{client['client_name']}' via member match.")
-                db.add_contact(client["client_id"], sender_phone)
+                db.add_contact(client["client_id"], sender_phone, client["client_name"])
             else:
                 print(f"[main] Unmapped group '{chat_id}' — not a VA client group.")
                 return {"status": "ok"}

@@ -308,11 +308,38 @@ def map_group_to_client(chat_id: str, group_name: str):
         print(f"  [map] No client matched '{group_name}' — left unmapped.")
 
 
+def _add_group_members_as_contacts(chat_id: str, client_id: str, client_name: str, gm_phone: str = None):
+    """Fetch all group members from Periskope and add them to client_contacts."""
+    headers = {
+        "authorization": f"Bearer {config.PERISKOPE_API_KEY}",
+        "x-phone": gm_phone or config.PERISKOPE_PHONE,
+    }
+    try:
+        resp = httpx.get(
+            f"{config.PERISKOPE_BASE_URL}/chats/{chat_id}",
+            headers=headers,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        members = resp.json().get("members") or {}
+    except Exception as e:
+        print(f"  [backfill] Could not fetch members for contact sync: {e}")
+        return
+
+    for raw_number in members.keys():
+        db.add_contact(client_id, raw_number, client_name)
+
+
 def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     print(f"\n[backfill] === Processing: '{group_name}' ===")
 
     # Lock in the group->client mapping in Supabase first (one-time).
     map_group_to_client(chat_id, group_name)
+
+    # Add all group members to client_contacts with the client name.
+    client = db.find_client_by_group(chat_id)
+    if client:
+        _add_group_members_as_contacts(chat_id, client["client_id"], client["client_name"], gm_phone)
 
     messages = fetch_all_messages(chat_id, gm_phone)
     print(f"[backfill] {len(messages)} message(s) to process.")

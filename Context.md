@@ -4,13 +4,20 @@ A WhatsApp file-collection bot. Files/messages sent by anyone in a client WhatsA
 group are automatically fetched and stored in a per-client folder on the Network
 File Share. Built on FastAPI + Periskope.
 
-_Last updated: 2026-06-19 — upload logging, Teams notifications, group-name-based
-auto-mapping, folder name = group name, office server + Cloudflare Tunnel deployment plan._
+_Last updated: 2026-06-22 — Teams notifications now LIVE: `TEAMS_WEBHOOK_URL` set in
+`.env` and verified (test POST returned HTTP 202). Storage in `main.py` is now
+`storage_sharepoint` (SharePoint via Graph). Earlier notes (upload logging, group-name
+auto-mapping, folder name = group name, office server + Cloudflare Tunnel plan) still apply._
 
-> **Status:** Bot working locally with Periskope webhooks and local disk storage.
-> Webhook fires, sender lookup works, files download and save to
-> `./storage/<Group Name>/`. Upload logging to Supabase and Teams notifications
-> built — pending Teams webhook URL and SQL table creation.
+> **Status:** Bot working with Periskope webhooks. Sender/group lookup works, files
+> download and save. Upload logging to Supabase `document_uploads` works.
+> **Teams notifications are LIVE** — `teams.py` posts an Adaptive Card to a Power
+> Automate **Workflows** webhook (`TEAMS_WEBHOOK_URL`), debounced 60s. The webhook
+> URL is set and a direct test POST succeeded (HTTP 202). NO Azure app / Graph /
+> admin-consent was needed for Teams — the Workflows webhook URL alone is enough.
+> **Note on storage:** `main.py` imports `storage_sharepoint as storage` (SharePoint
+> via Microsoft Graph), with `SHAREPOINT_*` creds in `.env` — the local-disk
+> `./storage/<Group Name>/` notes below describe an earlier/testing backend.
 >
 > **Production target:** Run bot on the **office server** (24/7, on LAN) → files
 > write directly to the **Network File Share** (`\\Server\ClientDocs\...`). Public
