@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment secrets
+.env
+.env.*
+
+# Local storage (never commit client files)
+storage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Google credentials
+service_account.json
+oauth_client.json
+token.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

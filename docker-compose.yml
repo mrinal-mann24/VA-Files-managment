@@ -1,0 +1,28 @@
+# va-bot — runs behind Hostinger's existing Traefik (which runs in host network mode).
+#
+# Traefik settings discovered on this VPS:
+#   - HTTPS entrypoint:        websecure (:443)
+#   - cert resolver:           letsencrypt (HTTP challenge on :80)
+#   - exposedbydefault=false   -> we MUST set traefik.enable=true
+#
+# The bot listens on 8000 inside the container. We also publish it on host
+# port 8001 so Traefik (host net) can reach it via the docker bridge gateway.
+services:
+  va-bot:
+    build: .
+    image: va-bot
+    container_name: va-bot
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - va-bot-storage:/data/storage
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vabot.rule=Host(`bot.187-127-173-25.sslip.io`)"
+      - "traefik.http.routers.vabot.entrypoints=websecure"
+      - "traefik.http.routers.vabot.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vabot.loadbalancer.server.url=http://127.0.0.1:8001"
+
+volumes:
+  va-bot-storage:
