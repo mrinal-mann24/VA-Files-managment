@@ -11,7 +11,8 @@ PERISKOPE_BASE_URL = os.getenv("PERISKOPE_BASE_URL", "https://api.periskope.app/
 PERISKOPE_MEDIA_BASE_URL = os.getenv("PERISKOPE_MEDIA_BASE_URL", "https://api.periskope.app")
 
 # --- Microsoft Teams --------------------------------------------------------
-TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")
+TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")  # legacy, no longer used
+TEAMS_CHAT_ID = os.getenv("TEAMS_CHAT_ID")  # group chat ID e.g. 19:xxxx@thread.v2
 
 # --- Local storage (for testing) --------------------------------------------
 STORAGE_ROOT = os.getenv("STORAGE_ROOT", "./storage")
