@@ -7,7 +7,7 @@ of uploads collapse into one message.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 
 import httpx
 
@@ -54,11 +54,13 @@ async def _debounced_notify(
     if count == 0:
         return
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST")
+    clean_phone = sender_phone.replace("@c.us", "").replace("@s.whatsapp.net", "")
     content = (
-        f"<b>{folder_name}</b><br>"
-        f"Uploaded <b>{count}</b> document(s)<br>"
-        f"Sender: {sender_phone}<br>"
+        f"<b>📁 New Upload — {folder_name}</b><br>"
+        f"Documents uploaded: <b>{count}</b><br>"
+        f"Sender: {clean_phone}<br>"
         f"Time: {now}"
     )
     await _send_teams_message(content)
