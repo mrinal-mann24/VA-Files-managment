@@ -236,6 +236,31 @@ def mark_notified(client_id: str):
         print(f"[db] ERROR marking notified: {e}")
 
 
+def get_va_for_client(client_id: str) -> dict | None:
+    """
+    Look up the assigned VA for a client.
+    Returns dict {va_name, teams_chat_id} or None if not found / not configured.
+    """
+    try:
+        resp = (
+            _supabase.table("clients")
+            .select("va_id, vas(va_name, teams_chat_id)")
+            .eq("client_id", client_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return None
+        va = rows[0].get("vas")
+        if not va or not va.get("teams_chat_id"):
+            return None
+        return {"va_name": va["va_name"], "teams_chat_id": va["teams_chat_id"]}
+    except Exception as e:
+        print(f"[db] ERROR fetching VA for client {client_id}: {e}")
+        return None
+
+
 def fetch_group_name(chat_id: str) -> str | None:
     """Fetch just the group name from Periskope for a given chat_id."""
     try:

@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- Supabase ---------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -13,6 +15,7 @@ PERISKOPE_MEDIA_BASE_URL = os.getenv("PERISKOPE_MEDIA_BASE_URL", "https://api.pe
 # --- Microsoft Teams --------------------------------------------------------
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")  # legacy, no longer used
 TEAMS_CHAT_ID = os.getenv("TEAMS_CHAT_ID")  # group chat ID e.g. 19:xxxx@thread.v2
+TEAMS_PERSONAL_WEBHOOK_URL = os.getenv("TEAMS_PERSONAL_WEBHOOK_URL")  # n8n endpoint for VA personal chat
 
 # --- Local storage (for testing) --------------------------------------------
 STORAGE_ROOT = os.getenv("STORAGE_ROOT", "./storage")

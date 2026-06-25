@@ -179,6 +179,11 @@ async def webhook(request: Request):
                 file_type=message_type,
                 file_size=file_size,
             )
+            # Look up assigned VA's Teams personal chat
+            va = db.get_va_for_client(client["client_id"])
+            teams_chat_id = va["teams_chat_id"] if va else None
+            if va:
+                print(f"[main] Notifying VA '{va['va_name']}' via personal Teams chat.")
             # Schedule Teams notification (debounced 60s)
             teams.notify(
                 client_id=client["client_id"],
@@ -187,6 +192,7 @@ async def webhook(request: Request):
                 sender_phone=sender_phone,
                 count_fn=db.get_unnotified_count,
                 mark_fn=db.mark_notified,
+                teams_chat_id=teams_chat_id,
             )
 
     else:

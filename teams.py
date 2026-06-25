@@ -19,22 +19,28 @@ _pending: dict[str, asyncio.Task] = {}
 DEBOUNCE_SECONDS = 60
 
 
-async def _send_teams_message(content: str):
-    """POST to n8n webhook which forwards to Teams group chat."""
-    if not config.TEAMS_WEBHOOK_URL:
-        print("[teams] TEAMS_WEBHOOK_URL not configured — skipping notification.")
+async def _send_teams_message(content: str, teams_chat_id: str | None = None):
+    """POST to n8n webhook which forwards to Teams.
+    If teams_chat_id is provided, sends to that personal chat via TEAMS_PERSONAL_WEBHOOK_URL.
+    Falls back to the legacy group chat webhook otherwise.
+    """
+    if teams_chat_id and config.TEAMS_PERSONAL_WEBHOOK_URL:
+        url = config.TEAMS_PERSONAL_WEBHOOK_URL
+        payload = {"chat_id": teams_chat_id, "message": content}
+        label = "VA personal chat"
+    elif config.TEAMS_WEBHOOK_URL:
+        url = config.TEAMS_WEBHOOK_URL
+        payload = {"body": {"content": content}}
+        label = "Teams group chat"
+    else:
+        print("[teams] No Teams webhook configured — skipping notification.")
         return
 
-    payload = {"body": {"content": content}}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                config.TEAMS_WEBHOOK_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
+            resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
             resp.raise_for_status()
-        print("[teams] Notification sent to Teams group chat.")
+        print(f"[teams] Notification sent to {label}.")
     except Exception as e:
         print(f"[teams] ERROR sending Teams notification: {e}")
 
@@ -46,6 +52,7 @@ async def _debounced_notify(
     sender_phone: str,
     count_fn,
     mark_fn,
+    teams_chat_id: str | None = None,
 ):
     """Wait DEBOUNCE_SECONDS, then send one Teams message with the total count."""
     await asyncio.sleep(DEBOUNCE_SECONDS)
@@ -63,7 +70,7 @@ async def _debounced_notify(
         f"Sender: {clean_phone}<br>"
         f"Time: {now}"
     )
-    await _send_teams_message(content)
+    await _send_teams_message(content, teams_chat_id=teams_chat_id)
     mark_fn(client_id)
     _pending.pop(client_id, None)
 
@@ -75,6 +82,7 @@ def notify(
     sender_phone: str,
     count_fn,
     mark_fn,
+    teams_chat_id: str | None = None,
 ):
     """
     Schedule a debounced Teams notification for this client.
@@ -88,7 +96,8 @@ def notify(
     loop = asyncio.get_event_loop()
     task = loop.create_task(
         _debounced_notify(
-            client_id, client_name, folder_name, sender_phone, count_fn, mark_fn
+            client_id, client_name, folder_name, sender_phone, count_fn, mark_fn,
+            teams_chat_id=teams_chat_id,
         )
     )
     _pending[client_id] = task
