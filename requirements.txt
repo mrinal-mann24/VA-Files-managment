@@ -2,3 +2,4 @@ fastapi
 uvicorn
 supabase
 httpx
+python-dotenv
