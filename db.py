@@ -107,7 +107,19 @@ def find_client_by_group(chat_id: str) -> dict | None:
     rows = resp.data or []
     if rows:
         row = rows[0]
-        folder_name = row.get("whatsapp_group_name") or row.get("client_name")
+        group_name = row.get("whatsapp_group_name") or ""
+        if not group_name:
+            fetched = fetch_group_name(group_id)
+            if fetched:
+                group_name = fetched
+                try:
+                    _supabase.table("clients").update(
+                        {"whatsapp_group_name": group_name}
+                    ).eq("client_id", row["client_id"]).execute()
+                    print(f"[db] Backfilled group name '{group_name}' for '{row['client_name']}'")
+                except Exception as e:
+                    print(f"[db] ERROR saving backfilled group name: {e}")
+        folder_name = group_name or row.get("client_name")
         print(f"[db] Group match: {group_id} -> '{row['client_name']}' (folder: '{folder_name}')")
         return {
             "client_id": row["client_id"],
