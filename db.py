@@ -33,6 +33,25 @@ def _strip(whatsapp_id: str) -> str:
     return (whatsapp_id or "").split("@")[0]
 
 
+def _get_parent_name(parent_client_id: str | None) -> str | None:
+    """Fetch the client_name of a parent client by its ID. Returns None if no parent."""
+    if not parent_client_id:
+        return None
+    try:
+        resp = (
+            _supabase.table("clients")
+            .select("client_name")
+            .eq("client_id", parent_client_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return rows[0]["client_name"] if rows else None
+    except Exception as e:
+        print(f"[db] ERROR fetching parent client name: {e}")
+        return None
+
+
 def find_client_by_number(whatsapp_number: str) -> dict | None:
     """
     Look up a WhatsApp number in client_contacts.
@@ -51,7 +70,7 @@ def find_client_by_number(whatsapp_number: str) -> dict | None:
                 _supabase.table("client_contacts")
                 .select(
                     "contact_name, whatsapp_number, client_id, "
-                    "clients(client_name, whatsapp_group_id, whatsapp_group_name)"
+                    "clients(client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id)"
                 )
                 .eq("whatsapp_number", candidate)
                 .limit(1)
@@ -70,13 +89,15 @@ def find_client_by_number(whatsapp_number: str) -> dict | None:
                 return None
             # folder_name = group name if we have it, else fall back to client_name
             folder_name = client.get("whatsapp_group_name") or client_name
-            print(f"[db] Number match: {candidate} -> '{client_name}' (folder: '{folder_name}')")
+            parent_name = _get_parent_name(client.get("parent_client_id"))
+            print(f"[db] Number match: {candidate} -> '{client_name}' (folder: '{folder_name}', parent: '{parent_name}')")
             return {
                 "client_id": row.get("client_id"),
                 "client_name": client_name,
                 "folder_name": folder_name,
                 "contact_name": row.get("contact_name"),
                 "whatsapp_group_id": client.get("whatsapp_group_id"),
+                "parent_name": parent_name,
             }
 
     return None
@@ -95,7 +116,7 @@ def find_client_by_group(chat_id: str) -> dict | None:
     try:
         resp = (
             _supabase.table("clients")
-            .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name")
+            .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id")
             .eq("whatsapp_group_id", group_id)
             .limit(1)
             .execute()
@@ -120,13 +141,15 @@ def find_client_by_group(chat_id: str) -> dict | None:
                 except Exception as e:
                     print(f"[db] ERROR saving backfilled group name: {e}")
         folder_name = group_name or row.get("client_name")
-        print(f"[db] Group match: {group_id} -> '{row['client_name']}' (folder: '{folder_name}')")
+        parent_name = _get_parent_name(row.get("parent_client_id"))
+        print(f"[db] Group match: {group_id} -> '{row['client_name']}' (folder: '{folder_name}', parent: '{parent_name}')")
         return {
             "client_id": row["client_id"],
             "client_name": row["client_name"],
             "folder_name": folder_name,
             "contact_name": None,
             "whatsapp_group_id": group_id,
+            "parent_name": parent_name,
         }
 
     print(f"[db] No client for group '{group_id}'.")
@@ -338,6 +361,7 @@ def find_client_by_group_members(chat_id: str) -> dict | None:
                 update_group_id(client["client_id"], chat_id, group_name)
             # Always return folder_name = group_name
             client["folder_name"] = group_name
+            # parent_name already populated by find_client_by_number
             return client
 
     print(f"[db] No member in '{group_name}' matched any client in Supabase.")

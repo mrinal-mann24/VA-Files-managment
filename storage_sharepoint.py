@@ -67,23 +67,29 @@ def _drive_url(path: str) -> str:
     return f"{GRAPH_BASE}/drives/{drive_id}{path}"
 
 
-def ensure_client_folder(client_name: str) -> str:
+def ensure_client_folder(client_name: str, parent_name: str | None = None) -> str:
     """
-    Create the client folder in SharePoint if it doesn't exist.
-    Returns the folder path string (used for logging).
+    Create the folder structure in SharePoint if it doesn't exist.
+    When parent_name is provided: /{root}/{parent_name}/{client_name}/
+    Otherwise:                    /{root}/{client_name}/
+    Returns the full folder path string (used for logging).
     """
     folder = _safe_name(client_name)
     root = config.SHAREPOINT_ROOT_FOLDER.strip("/")
 
     if root:
-        # Create root folder first (idempotent)
         _create_folder_if_missing("", root)
-        parent_path = f"/{root}"
+        base_path = f"/{root}"
     else:
-        parent_path = ""
+        base_path = ""
 
-    _create_folder_if_missing(parent_path, folder)
-    full_path = f"{parent_path}/{folder}" if root else f"/{folder}"
+    if parent_name:
+        parent_folder = _safe_name(parent_name)
+        _create_folder_if_missing(base_path, parent_folder)
+        base_path = f"{base_path}/{parent_folder}"
+
+    _create_folder_if_missing(base_path, folder)
+    full_path = f"{base_path}/{folder}"
     return full_path
 
 
@@ -145,13 +151,13 @@ def _unique_upload_path(folder_path: str, filename: str) -> tuple[str, str]:
         i += 1
 
 
-def save_media(client_name: str, url: str, filename: str | None) -> str | None:
+def save_media(client_name: str, url: str, filename: str | None, parent_name: str | None = None) -> str | None:
     """Download file from Periskope and upload it to SharePoint."""
     if not url:
         print("[sharepoint] No media URL — skipping.")
         return None
 
-    folder_path = ensure_client_folder(client_name)
+    folder_path = ensure_client_folder(client_name, parent_name)
 
     if not filename:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -188,12 +194,12 @@ def save_media(client_name: str, url: str, filename: str | None) -> str | None:
         return None
 
 
-def save_text_note(client_name: str, text: str) -> str | None:
+def save_text_note(client_name: str, text: str, parent_name: str | None = None) -> str | None:
     """Append a timestamped line to the client's notes.txt in SharePoint."""
     if not text:
         return None
 
-    folder_path = ensure_client_folder(client_name)
+    folder_path = ensure_client_folder(client_name, parent_name)
     drive_id = config.SHAREPOINT_DRIVE_ID
     notes_path = f"{folder_path}/notes.txt"
 

@@ -117,20 +117,28 @@ def _resolve_filename(media_obj, mimetype, timestamp):
     return _ensure_ext(base, mimetype)
 
 
-def _already_downloaded(group_name: str, filename: str) -> bool:
+def _already_downloaded(group_name: str, filename: str, parent_name: str = None) -> bool:
     """
     Check if a file already exists in SharePoint so we don't re-upload on re-runs.
     Uses the Graph API to check the exact path.
+    Respects parent/child folder structure when parent_name is provided.
     """
     from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE
     import httpx as _httpx
     root = config.SHAREPOINT_ROOT_FOLDER.strip("/")
-    folder = _safe_name(group_name)
     safe_file = _safe_name(filename)
+    folder = _safe_name(group_name)
+
     if root:
-        path = f"/{root}/{folder}/{safe_file}"
+        base = f"/{root}"
     else:
-        path = f"/{folder}/{safe_file}"
+        base = ""
+
+    if parent_name:
+        path = f"{base}/{_safe_name(parent_name)}/{folder}/{safe_file}"
+    else:
+        path = f"{base}/{folder}/{safe_file}"
+
     drive_id = config.SHAREPOINT_DRIVE_ID
     url = f"{GRAPH_BASE}/drives/{drive_id}/root:{path}"
     try:
@@ -341,6 +349,11 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     if client:
         _add_group_members_as_contacts(chat_id, client["client_id"], client["client_name"], gm_phone)
 
+    # If this group belongs to a parent client, files go inside the parent's folder.
+    parent_name = client.get("parent_name") if client else None
+    if parent_name:
+        print(f"[backfill] Parent folder: '{parent_name}' -> sub-folder: '{group_name}'")
+
     messages = fetch_all_messages(chat_id, gm_phone)
     print(f"[backfill] {len(messages)} message(s) to process.")
 
@@ -364,7 +377,7 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
                         ts_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
                     except Exception:
                         ts_str = timestamp
-                storage.save_text_note(group_name, f"[{ts_str}] {body}" if ts_str else body)
+                storage.save_text_note(group_name, f"[{ts_str}] {body}" if ts_str else body, parent_name)
                 notes_saved += 1
 
         elif message_type in ("image", "document", "video", "audio") or media_obj:
@@ -378,12 +391,12 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
 
             # Skip if this exact file is already in the folder (re-run safety).
             # Unlike the live bot, the backfill does NOT re-download duplicates.
-            if filename and _already_downloaded(group_name, filename):
+            if filename and _already_downloaded(group_name, filename, parent_name):
                 already_have += 1
                 continue
 
             media_url = _build_media_url(raw_path)
-            saved = storage.save_media(group_name, media_url, filename)
+            saved = storage.save_media(group_name, media_url, filename, parent_name)
             if saved:
                 files_saved += 1
             else:

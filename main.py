@@ -140,14 +140,15 @@ async def webhook(request: Request):
 
     client_name = client["client_name"]
     folder_name = client.get("folder_name") or client_name
-    print(f"[main] Client: '{client_name}' | Folder: '{folder_name}'")
+    parent_name = client.get("parent_name")
+    print(f"[main] Client: '{client_name}' | Folder: '{folder_name}' | Parent: '{parent_name}'")
 
     # ------------------------------------------------------------------ #
     # Step 4 — save the message / file                                    #
     # ------------------------------------------------------------------ #
     if message_type in ("text", "chat"):
         if body:
-            storage.save_text_note(folder_name, body)
+            storage.save_text_note(folder_name, body, parent_name)
 
     elif message_type in ("image", "document", "video", "audio") and has_media:
         raw_path = media_obj.get("path", "")
@@ -164,7 +165,7 @@ async def webhook(request: Request):
         print(f"Media URL : {media_url}")
         print(f"Filename  : {filename}")
 
-        saved = storage.save_media(folder_name, media_url, filename)
+        saved = storage.save_media(folder_name, media_url, filename, parent_name)
 
         if saved:
             # Log to Supabase
