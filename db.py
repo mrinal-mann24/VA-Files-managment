@@ -34,21 +34,30 @@ def _strip(whatsapp_id: str) -> str:
 
 
 def _get_parent_name(parent_client_id: str | None) -> str | None:
-    """Fetch the client_name of a parent client by its ID. Returns None if no parent."""
+    """
+    Return the parent client's FOLDER name (its whatsapp_group_name, falling back
+    to client_name). This must match exactly how the parent's own folder is named
+    everywhere else — folder_name = whatsapp_group_name — so sub-group folders nest
+    inside the parent's existing folder instead of creating a new one.
+    Returns None if there is no parent.
+    """
     if not parent_client_id:
         return None
     try:
         resp = (
             _supabase.table("clients")
-            .select("client_name")
+            .select("client_name, whatsapp_group_name")
             .eq("client_id", parent_client_id)
             .limit(1)
             .execute()
         )
         rows = resp.data or []
-        return rows[0]["client_name"] if rows else None
+        if not rows:
+            return None
+        row = rows[0]
+        return row.get("whatsapp_group_name") or row.get("client_name")
     except Exception as e:
-        print(f"[db] ERROR fetching parent client name: {e}")
+        print(f"[db] ERROR fetching parent folder name: {e}")
         return None
 
 
