@@ -45,6 +45,30 @@ async def _send_teams_message(content: str, teams_chat_id: str | None = None):
         print(f"[teams] ERROR sending Teams notification: {e}")
 
 
+async def notify_flag(
+    folder_name: str,
+    sender_phone: str,
+    body: str,
+    teams_chat_id: str | None = None,
+):
+    """
+    Send an INSTANT (no debounce) Teams alert to the assigned VA that a
+    customer flagged a message. Flags are act-now, so unlike uploads this
+    is not batched.
+    """
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST")
+    clean_phone = sender_phone.replace("@c.us", "").replace("@s.whatsapp.net", "")
+    quoted = body.strip() if body and body.strip() else "(no text)"
+    content = (
+        f"<b>🚩 Flagged message — {folder_name}</b><br>"
+        f"<i>&ldquo;{quoted}&rdquo;</i><br>"
+        f"From: {clean_phone}<br>"
+        f"Time: {now}"
+    )
+    await _send_teams_message(content, teams_chat_id=teams_chat_id)
+
+
 async def _debounced_notify(
     client_id: str,
     client_name: str,

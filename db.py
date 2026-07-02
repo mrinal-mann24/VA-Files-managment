@@ -305,6 +305,76 @@ def get_va_for_client(client_id: str) -> dict | None:
         return None
 
 
+def is_va_number(whatsapp_number: str) -> bool:
+    """
+    True if the given WhatsApp number belongs to a VA (not a customer).
+    Used to skip flag alerts raised by VAs themselves.
+    Compares bare digits against vas.whatsapp_number.
+    """
+    if not whatsapp_number:
+        return False
+
+    number = _strip(whatsapp_number)
+    candidates = [number, "+" + number] if not number.startswith("+") else [number, number[1:]]
+
+    try:
+        resp = (
+            _supabase.table("vas")
+            .select("va_id")
+            .in_("whatsapp_number", candidates)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as e:
+        print(f"[db] ERROR checking VA number {whatsapp_number}: {e}")
+        return False
+
+
+def record_flagged_message(
+    message_id: str,
+    client_id: str | None,
+    client_name: str | None,
+    chat_id: str,
+    sender_phone: str,
+    body: str,
+) -> bool:
+    """
+    Insert a flagged message into flagged_messages.
+    Returns True if this is the first time we've seen this message_id (proceed),
+    False if it already exists (duplicate — skip). Dedup relies on the
+    message_id PRIMARY KEY, so a repeat insert fails and we return False.
+    """
+    if not message_id:
+        # No id to dedup on — allow it through rather than lose the alert.
+        return True
+    try:
+        _supabase.table("flagged_messages").insert({
+            "message_id": message_id,
+            "client_id": client_id,
+            "client_name": client_name,
+            "chat_id": _strip(chat_id),
+            "sender_phone": _strip(sender_phone),
+            "body": body,
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"[db] Flag {message_id} already processed (or insert failed): {e}")
+        return False
+
+
+def mark_flag_notified(message_id: str):
+    """Stamp notified_at on a flagged message once the Teams alert is sent."""
+    if not message_id:
+        return
+    try:
+        _supabase.table("flagged_messages").update(
+            {"notified_at": "now()"}
+        ).eq("message_id", message_id).execute()
+    except Exception as e:
+        print(f"[db] ERROR stamping flag notified {message_id}: {e}")
+
+
 def fetch_group_name(chat_id: str) -> str | None:
     """Fetch just the group name from Periskope for a given chat_id."""
     try:

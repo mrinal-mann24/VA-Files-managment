@@ -72,6 +72,10 @@ async def webhook(request: Request):
     print(data)
 
     event = data.get("event") or data.get("event_type")
+
+    if event == "message.flagged":
+        return await _handle_flag(data.get("data", {}))
+
     if event != "message.created":
         return {"status": "ignored"}
 
@@ -199,6 +203,60 @@ async def webhook(request: Request):
     else:
         print(f"[main] Unhandled type '{message_type}' — skipping.")
 
+    return {"status": "ok"}
+
+
+async def _handle_flag(msg: dict):
+    """
+    A message was flagged in Periskope. If it came from a customer (not a VA)
+    and we haven't already alerted on it, DM the client's assigned VA on Teams.
+    """
+    message_id = msg.get("message_id") or msg.get("unique_id") or msg.get("id", {}).get("id") or ""
+    chat_id = msg.get("chat_id", "")
+    sender_phone = msg.get("sender_phone") or msg.get("author") or ""
+    body = msg.get("body") or ""
+
+    print(f"[flag] message_id={message_id!r} chat={chat_id} sender={sender_phone}")
+
+    # Skip flags raised by a VA — we only alert on customer messages.
+    if db.is_va_number(sender_phone):
+        print(f"[flag] Sender '{sender_phone}' is a VA — skipping.")
+        return {"status": "ok"}
+
+    # Identify the client: by sender number first, then by group.
+    client = db.find_client_by_number(sender_phone)
+    if not client and chat_id.endswith("@g.us"):
+        client = db.find_client_by_group(chat_id)
+    if not client:
+        print(f"[flag] Could not map flag to a client — skipping.")
+        return {"status": "ok"}
+
+    # Dedup: record it; if already recorded, don't alert twice.
+    if not db.record_flagged_message(
+        message_id=message_id,
+        client_id=client["client_id"],
+        client_name=client["client_name"],
+        chat_id=chat_id,
+        sender_phone=sender_phone,
+        body=body,
+    ):
+        print(f"[flag] Already processed message_id={message_id!r} — skipping.")
+        return {"status": "duplicate"}
+
+    folder_name = client.get("folder_name") or client["client_name"]
+    va = db.get_va_for_client(client["client_id"])
+    if not va:
+        print(f"[flag] No VA configured for '{client['client_name']}' — nothing to notify.")
+        return {"status": "ok"}
+
+    print(f"[flag] Alerting VA '{va['va_name']}' for '{client['client_name']}'.")
+    await teams.notify_flag(
+        folder_name=folder_name,
+        sender_phone=sender_phone,
+        body=body,
+        teams_chat_id=va["teams_chat_id"],
+    )
+    db.mark_flag_notified(message_id)
     return {"status": "ok"}
 
 
