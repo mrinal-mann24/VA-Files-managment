@@ -33,6 +33,40 @@ def _strip(whatsapp_id: str) -> str:
     return (whatsapp_id or "").split("@")[0]
 
 
+def _is_active(status: str | None) -> bool:
+    """
+    A client is considered ACTIVE only when clients.status is exactly 'active'
+    (case-insensitive). Anything else — 'Inactive', 'Paused', blank, NULL, a typo —
+    is treated as inactive so the bot skips the group entirely. Fail-closed: if we
+    don't clearly see 'active', we don't process.
+    """
+    return (status or "").strip().lower() == "active"
+
+
+def is_client_active(client_id: str) -> bool:
+    """
+    Look up a client's status by id and return True only if it's active.
+    Returns False on missing client or any error (fail-closed).
+    """
+    if not client_id:
+        return False
+    try:
+        resp = (
+            _supabase.table("clients")
+            .select("status")
+            .eq("client_id", client_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return False
+        return _is_active(rows[0].get("status"))
+    except Exception as e:
+        print(f"[db] ERROR checking status for client {client_id}: {e}")
+        return False
+
+
 def _get_parent_name(parent_client_id: str | None) -> str | None:
     """
     Return the parent client's FOLDER name (its whatsapp_group_name, falling back
@@ -79,7 +113,7 @@ def find_client_by_number(whatsapp_number: str) -> dict | None:
                 _supabase.table("client_contacts")
                 .select(
                     "contact_name, whatsapp_number, client_id, "
-                    "clients(client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id)"
+                    "clients(client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id, status)"
                 )
                 .eq("whatsapp_number", candidate)
                 .limit(1)
@@ -95,6 +129,10 @@ def find_client_by_number(whatsapp_number: str) -> dict | None:
             client = row.get("clients") or {}
             client_name = client.get("client_name")
             if not client_name:
+                return None
+            # Skip inactive clients entirely — no folder, no upload, no notify.
+            if not _is_active(client.get("status")):
+                print(f"[db] Client '{client_name}' is INACTIVE (status={client.get('status')!r}) — skipping.")
                 return None
             # folder_name = group name if we have it, else fall back to client_name
             folder_name = client.get("whatsapp_group_name") or client_name
@@ -125,7 +163,7 @@ def find_client_by_group(chat_id: str) -> dict | None:
     try:
         resp = (
             _supabase.table("clients")
-            .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id")
+            .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id, status")
             .eq("whatsapp_group_id", group_id)
             .limit(1)
             .execute()
@@ -137,6 +175,10 @@ def find_client_by_group(chat_id: str) -> dict | None:
     rows = resp.data or []
     if rows:
         row = rows[0]
+        # Skip inactive clients entirely — no folder, no upload, no notify.
+        if not _is_active(row.get("status")):
+            print(f"[db] Client '{row.get('client_name')}' is INACTIVE (status={row.get('status')!r}) — skipping.")
+            return None
         group_name = row.get("whatsapp_group_name") or ""
         if not group_name:
             fetched = fetch_group_name(group_id)

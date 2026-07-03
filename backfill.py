@@ -344,13 +344,20 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     # Lock in the group->client mapping in Supabase first (one-time).
     map_group_to_client(chat_id, group_name)
 
-    # Add all group members to client_contacts with the client name.
+    # Skip inactive clients entirely — the nightly cron must not fetch messages
+    # or download files for a client marked inactive in Supabase.
+    # find_client_by_group already returns None for inactive clients, so an
+    # inactive (mapped) group produces client=None here and is skipped below.
     client = db.find_client_by_group(chat_id)
-    if client:
-        _add_group_members_as_contacts(chat_id, client["client_id"], client["client_name"], gm_phone)
+    if not client:
+        print(f"[backfill] '{group_name}' has no active client mapping (unmapped or INACTIVE) — skipping.")
+        return 0, 0
+
+    # Add all group members to client_contacts with the client name.
+    _add_group_members_as_contacts(chat_id, client["client_id"], client["client_name"], gm_phone)
 
     # If this group belongs to a parent client, files go inside the parent's folder.
-    parent_name = client.get("parent_name") if client else None
+    parent_name = client.get("parent_name")
     if parent_name:
         print(f"[backfill] Parent folder: '{parent_name}' -> sub-folder: '{group_name}'")
 
