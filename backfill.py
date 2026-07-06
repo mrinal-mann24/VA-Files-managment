@@ -148,6 +148,39 @@ def _already_downloaded(group_name: str, filename: str, parent_name: str = None)
         return False
 
 
+def _fetch_existing_notes(group_name: str, parent_name: str = None) -> str:
+    """
+    Return the current text of the group's notes.txt (empty string if none).
+    Fetched once per group so we can skip re-appending note lines we already
+    wrote on a previous run. Respects parent/child folder structure.
+    """
+    from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE
+    import httpx as _httpx
+    root = config.SHAREPOINT_ROOT_FOLDER.strip("/")
+    folder = _safe_name(group_name)
+
+    base = f"/{root}" if root else ""
+    if parent_name:
+        path = f"{base}/{_safe_name(parent_name)}/{folder}/notes.txt"
+    else:
+        path = f"{base}/{folder}/notes.txt"
+
+    drive_id = config.SHAREPOINT_DRIVE_ID
+    url = f"{GRAPH_BASE}/drives/{drive_id}/root:{path}:/content"
+    try:
+        resp = _httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {_get_token()}"},
+            timeout=15.0,
+            follow_redirects=True,
+        )
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        pass
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — List all chats across ALL connected GM phones
 # ---------------------------------------------------------------------------
@@ -364,6 +397,11 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     messages = fetch_all_messages(chat_id, gm_phone)
     print(f"[backfill] {len(messages)} message(s) to process.")
 
+    # Fetch the group's existing notes.txt once. Each note line embeds the
+    # message's own timestamp ("[<msg-ts>] <body>"), which is stable across
+    # runs, so we can skip re-appending lines we already wrote on a prior run.
+    existing_notes = _fetch_existing_notes(group_name, parent_name)
+
     files_saved = 0
     notes_saved = 0
     already_have = 0
@@ -375,23 +413,12 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
         media_obj = msg.get("media") or {}
         timestamp = msg.get("timestamp") or msg.get("created_at") or ""
 
-        if message_type in ("text", "chat"):
-            if body:
-                ts_str = ""
-                if timestamp:
-                    try:
-                        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                        ts_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    except Exception:
-                        ts_str = timestamp
-                storage.save_text_note(group_name, f"[{ts_str}] {body}" if ts_str else body, parent_name)
-                notes_saved += 1
-
-        elif message_type in ("image", "document", "video", "audio") or media_obj:
+        # Any message carrying a media object is an attachment worth saving,
+        # regardless of its message_type string (payment cards, stickers,
+        # contacts, unknown types). Mirrors the live bot in main.py so live and
+        # historical capture never disagree.
+        if media_obj and (media_obj.get("path") or media_obj.get("url")):
             raw_path = media_obj.get("path") or media_obj.get("url") or ""
-            if not raw_path:
-                skipped += 1
-                continue
 
             mimetype = media_obj.get("mimetype") or media_obj.get("mime_type") or ""
             filename = _resolve_filename(media_obj, mimetype, timestamp)
@@ -408,6 +435,30 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
                 files_saved += 1
             else:
                 skipped += 1
+
+        elif body:
+            # No media — save any text content (plain text, chat, or a caption on
+            # a non-downloadable message) as a timestamped note so nothing is lost.
+            ts_str = ""
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    ts_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except Exception:
+                    ts_str = timestamp
+            note_text = f"[{ts_str}] {body}" if ts_str else body
+
+            # Re-run safety: skip lines already in notes.txt. The message
+            # timestamp + body is a stable key across runs (save_text_note
+            # prepends its own upload-time stamp, so we match on the substring).
+            if note_text in existing_notes:
+                already_have += 1
+                continue
+
+            storage.save_text_note(group_name, note_text, parent_name)
+            existing_notes += note_text  # keep in-memory copy current within this run
+            notes_saved += 1
+
         else:
             skipped += 1
 

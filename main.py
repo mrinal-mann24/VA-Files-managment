@@ -150,11 +150,12 @@ async def webhook(request: Request):
     # ------------------------------------------------------------------ #
     # Step 4 — save the message / file                                    #
     # ------------------------------------------------------------------ #
-    if message_type in ("text", "chat"):
-        if body:
-            storage.save_text_note(folder_name, body, parent_name)
-
-    elif message_type in ("image", "document", "video", "audio") and has_media:
+    if has_media:
+        # Any message carrying a media object is an attachment worth saving,
+        # regardless of its message_type string. WhatsApp payment cards,
+        # stickers, contacts, and unusual/unknown types all land here as long
+        # as Periskope gives us a downloadable media object. This mirrors the
+        # backfill script, so live and historical capture never disagree.
         raw_path = media_obj.get("path", "")
         mimetype = media_obj.get("mimetype", "")
         file_size = media_obj.get("size") or 0
@@ -200,8 +201,13 @@ async def webhook(request: Request):
                 teams_chat_id=teams_chat_id,
             )
 
+    elif body:
+        # No media — save any text content (plain text, chat, or a caption on a
+        # non-downloadable message) as a timestamped note so nothing is lost.
+        storage.save_text_note(folder_name, body, parent_name)
+
     else:
-        print(f"[main] Unhandled type '{message_type}' — skipping.")
+        print(f"[main] Empty '{message_type}' message with no media/body — skipping.")
 
     return {"status": "ok"}
 
