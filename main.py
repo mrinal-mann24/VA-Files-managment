@@ -206,6 +206,33 @@ async def webhook(request: Request):
         # non-downloadable message) as a timestamped note so nothing is lost.
         storage.save_text_note(folder_name, body, parent_name)
 
+        # Additionally land the raw message in the client_messages knowledge base
+        # for later (separate) LLM fact extraction. This is isolated: save_message
+        # swallows its own errors and never raises, so a DB/network/Supabase issue
+        # here can never break the SharePoint save or Teams notify flow above.
+        #
+        # Strict capture rules for the knowledge base (narrower than the SharePoint
+        # flow above, which saves from any group a known contact appears in):
+        #   1. Skip our own outbound replies (from_me) — KB is for what clients tell us.
+        #   2. Only capture messages sent IN the client's OWN registered VA group
+        #      (chat_id == clients.whatsapp_group_id). A known contact chatting in
+        #      some other group (AIA, onboarding, a second group) is NOT captured.
+        registered_group_id = db.get_registered_group_id(client["client_id"])
+        in_own_va_group = (
+            is_group
+            and registered_group_id
+            and chat_id.split("@")[0] == registered_group_id
+        )
+        if not msg.get("from_me") and in_own_va_group:
+            db.save_message(
+                client_id=client["client_id"],
+                whatsapp_group_id=chat_id,
+                sender_phone=sender_phone,
+                body=body,
+                message_timestamp=msg.get("timestamp") or "",
+                unique_id=unique_id,
+            )
+
     else:
         print(f"[main] Empty '{message_type}' message with no media/body — skipping.")
 
