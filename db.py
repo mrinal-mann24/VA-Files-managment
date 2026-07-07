@@ -2,6 +2,7 @@
 Supabase lookups and writes for the va-bot.
 """
 
+import hashlib
 import re
 from supabase import create_client, Client
 import httpx
@@ -65,6 +66,34 @@ def is_client_active(client_id: str) -> bool:
     except Exception as e:
         print(f"[db] ERROR checking status for client {client_id}: {e}")
         return False
+
+
+def get_registered_group_id(client_id: str) -> str | None:
+    """
+    Return the client's own registered whatsapp_group_id (bare, no @g.us) from
+    the clients table, or None if unset / not found / on error.
+
+    Read fresh from clients rather than trusting a lookup dict, because the Step-2
+    lookup path fills the dict's whatsapp_group_id with the *incoming* group. Used
+    to gate knowledge-base capture to a client's official VA group only.
+    """
+    if not client_id:
+        return None
+    try:
+        resp = (
+            _supabase.table("clients")
+            .select("whatsapp_group_id")
+            .eq("client_id", client_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return None
+        return _strip(rows[0].get("whatsapp_group_id") or "") or None
+    except Exception as e:
+        print(f"[db] ERROR fetching registered group id for client {client_id}: {e}")
+        return None
 
 
 def _get_parent_name(parent_client_id: str | None) -> str | None:
@@ -292,6 +321,78 @@ def log_upload(
         return upload_id
     except Exception as e:
         print(f"[db] ERROR logging upload: {e}")
+        return None
+
+
+def _message_dedup_hash(
+    client_id: str | None,
+    whatsapp_group_id: str | None,
+    message_timestamp: str,
+    body: str,
+) -> str:
+    """
+    Content-based fallback dedup key for a chat message.
+
+    Used only when Periskope's unique_id isn't available (e.g. a future backfill
+    from existing notes.txt files, which have no Periskope id). Hashes the
+    client/group + message timestamp + normalized body so the same message always
+    maps to the same key regardless of who ingested it or when. Kept general on
+    purpose — not hardcoded to assume a unique_id exists.
+    """
+    normalized_body = (body or "").strip()
+    parts = [
+        client_id or "",
+        _strip(whatsapp_group_id or ""),
+        message_timestamp or "",
+        normalized_body,
+    ]
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def save_message(
+    client_id: str | None,
+    whatsapp_group_id: str | None,
+    sender_phone: str,
+    body: str,
+    message_timestamp: str,
+    unique_id: str | None = None,
+) -> str | None:
+    """
+    Insert one chat message into client_messages for the knowledge base.
+
+    Dedup key is Periskope's unique_id when available, otherwise a content-based
+    hash (see _message_dedup_hash) so a future notes.txt backfill can reuse this
+    same path. The table's UNIQUE(dedup_hash) constraint is the persistent guard —
+    a repeat insert simply fails and is treated as a no-op.
+
+    Returns the message_id (uuid) or None on failure / duplicate. Callers must
+    treat any failure here as non-fatal — this write must never interrupt the
+    existing SharePoint save / Teams notify flow.
+    """
+    if not (body or "").strip():
+        return None
+
+    dedup_hash = (unique_id or "").strip() or _message_dedup_hash(
+        client_id, whatsapp_group_id, message_timestamp, body
+    )
+
+    try:
+        resp = _supabase.table("client_messages").insert({
+            "client_id": client_id,
+            "whatsapp_group_id": _strip(whatsapp_group_id or "") or None,
+            "sender_phone": _strip(sender_phone or "") or None,
+            "body": body,
+            "message_timestamp": message_timestamp,
+            "dedup_hash": dedup_hash,
+        }).execute()
+        message_id = (resp.data or [{}])[0].get("message_id")
+        print(f"[db] Saved message to knowledge base (id={message_id}, dedup={dedup_hash[:12]}...)")
+        return message_id
+    except Exception as e:
+        # Includes the expected duplicate-key case (dedup_hash already present)
+        # as well as any real error. Either way, never raise — logging only.
+        print(f"[db] Skipped/failed knowledge-base message insert (dedup={dedup_hash[:12]}...): {e}")
         return None
 
 
