@@ -357,6 +357,7 @@ def save_message(
     body: str,
     message_timestamp: str,
     unique_id: str | None = None,
+    direction: str | None = None,
 ) -> str | None:
     """
     Insert one chat message into client_messages for the knowledge base.
@@ -365,6 +366,9 @@ def save_message(
     hash (see _message_dedup_hash) so a future notes.txt backfill can reuse this
     same path. The table's UNIQUE(dedup_hash) constraint is the persistent guard —
     a repeat insert simply fails and is treated as a no-op.
+
+    direction ('incoming' | 'outgoing') is resolved by the caller from Periskope's
+    from_me flag, never guessed here.
 
     Returns the message_id (uuid) or None on failure / duplicate. Callers must
     treat any failure here as non-fatal — this write must never interrupt the
@@ -385,6 +389,8 @@ def save_message(
             "body": body,
             "message_timestamp": message_timestamp,
             "dedup_hash": dedup_hash,
+            "direction": direction,
+            "source": "periskope",
         }).execute()
         message_id = (resp.data or [{}])[0].get("message_id")
         print(f"[db] Saved message to knowledge base (id={message_id}, dedup={dedup_hash[:12]}...)")

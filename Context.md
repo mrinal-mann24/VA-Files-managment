@@ -301,6 +301,28 @@ Bot's Windows account needs write permission on the share.
 - [ ] Swap `storage.py` to write to `\\Server\ClientDocs` when on office server
 - [ ] Set up Cloudflare Tunnel on office server
 - [ ] Dedup webhook fires (Periskope fires once per connected GM — same file arrives 2-3×)
+- [ ] Re-run `backfill_chats.py` for the pilot client's group so existing rows get
+      `direction` populated and outbound (VA) messages get captured for the first time
+
+## 2026-08-06 — client_messages direction/source fix (client health score prep)
+
+Found while scoping the client health score idea: all 837 existing `client_messages`
+rows had `direction` and `source` NULL, and outbound (VA) replies were never saved
+at all — `main.py` explicitly skipped `from_me` messages before the knowledge-base
+insert. This meant the table only ever had half a conversation (client side only),
+with no way to tell inbound from outbound even for what was captured.
+
+Fixed in `main.py`, `db.py`, `backfill_chats.py`:
+- `db.save_message()` now accepts `direction` and always writes `source='periskope'`.
+- `main.py` resolves `direction` from Periskope's `from_me` flag (`"outgoing"` if
+  true, else `"incoming"`) and no longer skips outbound messages before saving.
+- `backfill_chats.py` does the same for historical backfills — safe to re-run since
+  dedup is on Periskope's `unique_id`; re-running will backfill `direction` on old
+  rows and add previously-skipped outbound messages, not duplicate anything.
+
+This was a prerequisite for the client health score system (see chat history) —
+scoring needs to see both "client complained" and "did the VA reply / how fast"
+signals, which requires knowing which side of the conversation each message is on.
 
 ---
 
