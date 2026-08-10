@@ -430,7 +430,7 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
                 continue
 
             media_url = _build_media_url(raw_path)
-            saved = storage.save_media(group_name, media_url, filename, parent_name)
+            saved = storage.save_media(group_name, media_url, filename, parent_name, message_timestamp=timestamp)
             if saved:
                 files_saved += 1
             else:
@@ -473,12 +473,30 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
 # Main
 # ---------------------------------------------------------------------------
 
+def _merge_with_mapped_groups(va_groups: list[dict]) -> list[dict]:
+    """
+    Add already-mapped clients (from Supabase) that list_va_groups() would miss
+    because their group name doesn't match _CLIENT_GROUP_PATTERNS — e.g.
+    sub-groups like "BR Parlours Admin Group" or "NEE Accounts". Discovered
+    groups keep their gm_phone (needed to fetch messages); mapped-only groups
+    get gm_phone=None, which fetch_all_messages() falls back to config's
+    default phone for.
+    """
+    seen_ids = {g["chat_id"] for g in va_groups}
+    merged = list(va_groups)
+    for g in db.list_mapped_groups():
+        if g["chat_id"] not in seen_ids:
+            seen_ids.add(g["chat_id"])
+            merged.append({"chat_id": g["chat_id"], "chat_name": g["chat_name"], "gm_phone": None})
+    return merged
+
+
 def main():
     print("=" * 60)
     print("  va-bot Backfill — Historical file download")
     print("=" * 60)
 
-    va_groups = list_va_groups()
+    va_groups = _merge_with_mapped_groups(list_va_groups())
 
     if not va_groups:
         print("\n[backfill] No VA groups found. Check PERISKOPE_API_KEY and PERISKOPE_PHONE in config.py.")

@@ -151,8 +151,56 @@ def _unique_upload_path(folder_path: str, filename: str) -> tuple[str, str]:
         i += 1
 
 
-def save_media(client_name: str, url: str, filename: str | None, parent_name: str | None = None) -> str | None:
-    """Download file from Periskope and upload it to SharePoint."""
+def _parse_timestamp(message_timestamp: str | None) -> str | None:
+    """
+    Parse a Periskope message timestamp into the ISO-8601 UTC string Graph's
+    fileSystemInfo expects (e.g. "2024-03-05T10:15:00Z"). Returns None if
+    missing/unparseable, so the caller falls back to upload time.
+    """
+    if not message_timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(message_timestamp.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
+def _set_file_dates(item_id: str, iso_timestamp: str):
+    """
+    PATCH the uploaded file's fileSystemInfo so SharePoint shows the message's
+    original date instead of the upload (backfill run) date. Best-effort —
+    logs and continues on failure so a date-stamp error never drops a file.
+    """
+    drive_id = config.SHAREPOINT_DRIVE_ID
+    url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+    payload = {
+        "fileSystemInfo": {
+            "createdDateTime": iso_timestamp,
+            "lastModifiedDateTime": iso_timestamp,
+        }
+    }
+    try:
+        resp = httpx.patch(url, json=payload, headers=_headers(), timeout=15.0)
+        resp.raise_for_status()
+        print(f"[sharepoint] Dated -> {iso_timestamp}")
+    except Exception as e:
+        print(f"[sharepoint] WARNING: could not set original date: {e}")
+
+
+def save_media(
+    client_name: str,
+    url: str,
+    filename: str | None,
+    parent_name: str | None = None,
+    message_timestamp: str | None = None,
+) -> str | None:
+    """
+    Download file from Periskope and upload it to SharePoint.
+    When message_timestamp is given (the WhatsApp message's own timestamp),
+    the uploaded file's created/modified date is backdated to it instead of
+    showing today's (upload) date.
+    """
     if not url:
         print("[sharepoint] No media URL — skipping.")
         return None
@@ -188,6 +236,12 @@ def save_media(client_name: str, url: str, filename: str | None, parent_name: st
         result = up_resp.json()
         web_url = result.get("webUrl", "")
         print(f"[sharepoint] Uploaded -> {web_url}")
+
+        iso_ts = _parse_timestamp(message_timestamp)
+        item_id = result.get("id")
+        if iso_ts and item_id:
+            _set_file_dates(item_id, iso_ts)
+
         return web_url
     except Exception as e:
         print(f"[sharepoint] ERROR uploading to SharePoint: {e}")

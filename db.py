@@ -236,6 +236,45 @@ def find_client_by_group(chat_id: str) -> dict | None:
     return None
 
 
+def list_mapped_groups() -> list[dict]:
+    """
+    Return every ACTIVE client that already has a whatsapp_group_id saved in
+    Supabase — i.e. every group backfill should process, regardless of whether
+    its name matches _CLIENT_GROUP_PATTERNS.
+
+    _CLIENT_GROUP_PATTERNS is only needed to *discover new, unmapped* groups by
+    name (map_group_to_client). Once a group is mapped — including sub-groups
+    like "BR Parlours Admin Group" or "NEE Accounts" that don't contain "VA" —
+    it belongs here regardless of name, exactly like the live webhook (which
+    trusts whatsapp_group_id, never the name, once mapped).
+
+    Returns [{chat_id, chat_name}], chat_id bare (no @g.us — callers append it).
+    """
+    try:
+        resp = (
+            _supabase.table("clients")
+            .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name, status")
+            .not_.is_("whatsapp_group_id", "null")
+            .execute()
+        )
+    except Exception as e:
+        print(f"[db] ERROR listing mapped groups: {e}")
+        return []
+
+    groups = []
+    for row in resp.data or []:
+        if not _is_active(row.get("status")):
+            continue
+        group_id = _strip(row.get("whatsapp_group_id") or "")
+        if not group_id:
+            continue
+        groups.append({
+            "chat_id": f"{group_id}@g.us",
+            "chat_name": row.get("whatsapp_group_name") or row.get("client_name") or group_id,
+        })
+    return groups
+
+
 def update_group_id(client_id: str, group_id: str, group_name: str):
     """
     Save whatsapp_group_id and whatsapp_group_name on a client row.

@@ -160,12 +160,15 @@ def _resolve_groups(target_chat_id: str | None) -> list[dict]:
 
     - No argument: discover every VA group across all connected phones, reusing
       backfill.list_va_groups() so we get the correct gm_phone for each group
-      (some groups are only visible to one phone).
+      (some groups are only visible to one phone) — merged with every group
+      already mapped in Supabase (db.list_mapped_groups()), so sub-groups whose
+      name doesn't match the VA name patterns (e.g. "BR Parlours Admin Group",
+      "NEE Accounts") are included too, same as backfill.py.
     - A chat_id argument: process just that one group. We still discover groups so
       we can pass the right gm_phone; if it isn't found we fall back to the
       default phone (None) rather than fail.
     """
-    va_groups = backfill.list_va_groups()
+    va_groups = backfill._merge_with_mapped_groups(backfill.list_va_groups())
 
     if not target_chat_id:
         return va_groups
