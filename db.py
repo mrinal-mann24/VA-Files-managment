@@ -619,17 +619,24 @@ def find_client_by_group_members(chat_id: str) -> dict | None:
     print(f"[db] {len(members)} members — checking against Supabase...")
 
     # --- 4. Cross-reference members against client_contacts ---
+    # Only a client that has NO group yet can claim this group. Internal team
+    # numbers (and shared contacts) are members of many groups and registered
+    # under some client that is already mapped — taking the first match would
+    # file this new group under them.
     for raw_number in members.keys():
         client = find_client_by_number(raw_number)
-        if client:
-            print(f"[db] Member {raw_number} matched client '{client['client_name']}'")
-            # --- 5. Save group ID + group name (once, never overwrite) ---
-            if not client.get("whatsapp_group_id"):
-                update_group_id(client["client_id"], chat_id, group_name)
-            # Always return folder_name = group_name
-            client["folder_name"] = group_name
-            # parent_name already populated by find_client_by_number
-            return client
+        if not client:
+            continue
+        if client.get("whatsapp_group_id"):
+            print(f"[db] Member {raw_number} belongs to '{client['client_name']}' which is already mapped to another group — skipping.")
+            continue
+        print(f"[db] Member {raw_number} matched client '{client['client_name']}'")
+        # --- 5. Save group ID + group name (once, never overwrite) ---
+        update_group_id(client["client_id"], chat_id, group_name)
+        # Always return folder_name = group_name
+        client["folder_name"] = group_name
+        # parent_name already populated by find_client_by_number
+        return client
 
-    print(f"[db] No member in '{group_name}' matched any client in Supabase.")
+    print(f"[db] No unmapped client matched any member of '{group_name}'.")
     return None

@@ -97,33 +97,42 @@ async def webhook(request: Request):
     print(f"sender_phone: {sender_phone}")
     print(f"type        : {message_type}")
 
+    # Only WhatsApp *group* chats are processed. 1:1 chats are ignored outright,
+    # even when the sender is a known client contact: internal staff numbers sit
+    # in client_contacts too (they're members of the VA groups), and their direct
+    # chats with leads were being filed under whichever client they matched.
+    if not is_group:
+        print(f"[main] 1:1 chat '{chat_id}' — ignored (groups only).")
+        return {"status": "ignored"}
+
     # ------------------------------------------------------------------ #
-    # Step 1 — try to identify client by sender's number                  #
+    # Step 1 — the group the message was posted in decides the client.   #
+    # This must come BEFORE any sender-number lookup: team members and   #
+    # shared contacts sit in many groups (and in client_contacts), so    #
+    # matching by sender first files a post in client B's group under    #
+    # client A. Same order the backfill scripts already use.             #
     # ------------------------------------------------------------------ #
-    client = db.find_client_by_number(sender_phone)
+    client = db.find_client_by_group(chat_id)
 
     if client:
-        # Number is known. If this is a group message and the group ID
-        # isn't stored yet, fetch the group name from Periskope and save both.
-        if is_group and not client.get("whatsapp_group_id"):
+        # Known group. Make sure the sender is in client_contacts for this
+        # client (no-op if the number already exists anywhere).
+        db.add_contact(client["client_id"], sender_phone, client["client_name"])
+
+    else:
+        # ------------------------------------------------------------------ #
+        # Step 2 — unmapped group. If the sender belongs to a client that    #
+        # has NO group yet, this is that client's first group message:       #
+        # map the group to them now. A sender whose client already has a    #
+        # different group is NOT used — that is exactly the mis-filing case. #
+        # ------------------------------------------------------------------ #
+        by_number = db.find_client_by_number(sender_phone)
+        if by_number and not by_number.get("whatsapp_group_id"):
             group_name = db.fetch_group_name(chat_id)
-            db.update_group_id(client["client_id"], chat_id, group_name or "")
+            db.update_group_id(by_number["client_id"], chat_id, group_name or "")
             if group_name:
-                client["folder_name"] = group_name
-
-    elif is_group:
-        # ------------------------------------------------------------------ #
-        # Step 2 — unknown sender, but maybe we know the group               #
-        # ------------------------------------------------------------------ #
-        client = db.find_client_by_group(chat_id)
-
-        if client:
-            # Group is known → this is a new person (e.g. another contact
-            # from the same company) sending in the group.
-            # Auto-add their number to client_contacts so next time they're
-            # recognised immediately without hitting Step 2 again.
-            print(f"[main] New number '{sender_phone}' in known group — auto-adding to contacts.")
-            db.add_contact(client["client_id"], sender_phone, client["client_name"])
+                by_number["folder_name"] = group_name
+            client = by_number
         else:
             # ------------------------------------------------------------------ #
             # Step 3 — unknown group: check if group name contains "<> VA" or    #
@@ -136,11 +145,6 @@ async def webhook(request: Request):
             else:
                 print(f"[main] Unmapped group '{chat_id}' — not a VA client group.")
                 return {"status": "ok"}
-
-    else:
-        # 1:1 chat, unknown number — skip
-        print(f"[main] Unknown sender '{sender_phone}' in 1:1 chat — skipping.")
-        return {"status": "ok"}
 
     client_name = client["client_name"]
     folder_name = client.get("folder_name") or client_name
@@ -219,8 +223,7 @@ async def webhook(request: Request):
         # which side of the conversation each message is on.
         registered_group_id = db.get_registered_group_id(client["client_id"])
         in_own_va_group = (
-            is_group
-            and registered_group_id
+            registered_group_id
             and chat_id.split("@")[0] == registered_group_id
         )
         if in_own_va_group:
