@@ -2,7 +2,10 @@ import hmac
 from collections import deque
 from urllib.parse import unquote, urlparse
 
+import asyncio
+
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 import config
@@ -12,6 +15,12 @@ import storage_sharepoint as storage
 import teams
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def _remember_event_loop():
+    # Message processing runs in worker threads; Teams timers and posts are handed back to this loop.
+    teams.MAIN_LOOP = asyncio.get_running_loop()
 
 # Dedup: Periskope fires the webhook once per connected GM in the group,
 # so the same message arrives 2-3× within seconds. Remember the last 500
@@ -125,7 +134,9 @@ async def webhook(request: Request):
         return {"status": "duplicate"}
 
     try:
-        result = _process_message(msg, unique_id)
+        # Downloads, uploads and database calls block; run them in a worker thread so one slow file
+        # never stops the server from answering other webhooks.
+        result = await run_in_threadpool(_process_message, msg, unique_id)
     except Exception as e:
         # Not marked seen: the next copy of this message (another phone) or Periskope's retry
         # processes it again instead of it being lost.
@@ -145,6 +156,26 @@ async def webhook(request: Request):
         return JSONResponse(result, status_code=500)
     _mark_seen(unique_id)
     return result
+
+
+def _save_to_knowledge_base(client: dict, chat_id: str, sender_phone: str, body: str, msg: dict, unique_id: str) -> None:
+    """Save a text message or caption to client_messages, only in the client's OWN registered group.
+    Outgoing = sent from a connected Periskope phone (from_me) OR by any team number."""
+    if not config.SAVE_CHAT_MESSAGES_ENABLED:
+        return
+    registered_group_id = db.get_registered_group_id(client["client_id"])
+    if not (registered_group_id and chat_id.split("@")[0] == registered_group_id):
+        return
+    outgoing = bool(msg.get("from_me")) or db.is_team_number(sender_phone)
+    db.save_message(
+        client_id=client["client_id"],
+        whatsapp_group_id=chat_id,
+        sender_phone=sender_phone,
+        body=body,
+        message_timestamp=msg.get("timestamp") or "",
+        unique_id=unique_id,
+        direction="outgoing" if outgoing else "incoming",
+    )
 
 
 def _process_message(msg: dict, unique_id: str) -> dict:
@@ -180,8 +211,14 @@ def _process_message(msg: dict, unique_id: str) -> dict:
 
     if client:
         # Known group. Make sure the sender is in client_contacts for this
-        # client (no-op if the number already exists anywhere).
+        # client (no-op if the number already exists anywhere, or is a team number).
         db.add_contact(client["client_id"], sender_phone, client["client_name"])
+
+    elif db.group_is_mapped(chat_id):
+        # The group already belongs to a client that is not active. Never let the sender / member
+        # fallbacks below re-link it to some other client.
+        print(f"[main] Group '{chat_id}' belongs to an inactive client — skipping.")
+        return {"status": "ignored"}
 
     else:
         # ------------------------------------------------------------------ #
@@ -207,7 +244,13 @@ def _process_message(msg: dict, unique_id: str) -> dict:
                 print(f"[main] Auto-mapped group '{chat_id}' to '{client['client_name']}' via member match.")
                 db.add_contact(client["client_id"], sender_phone, client["client_name"])
             else:
-                print(f"[main] Unmapped group '{chat_id}' — not a VA client group.")
+                group_name = db.fetch_group_name(chat_id) or ""
+                if db.is_va_group_name(group_name):
+                    # Looks like a client group but no client matches: say so, never drop it silently.
+                    failures.record_unlinked_group(chat_id, group_name, unique_id)
+                    print(f"[main] VA group '{group_name}' ({chat_id}) is not linked to a client — recorded.")
+                else:
+                    print(f"[main] Unmapped group '{chat_id}' — not a VA client group.")
                 return {"status": "ok"}
 
     client_name = client["client_name"]
@@ -247,6 +290,11 @@ def _process_message(msg: dict, unique_id: str) -> dict:
             failures.record("file", client_name=client_name, chat_id=chat_id, unique_id=unique_id,
                             filename=filename, reason="download or SharePoint upload failed (see the log above)")
             return {"status": "failed", "reason": "file not saved"}
+
+        # The caption on a photo or document is real text ("invoice for Oct, please book it"): keep it
+        # in the knowledge base too, not only the file.
+        if body.strip():
+            _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
 
         if saved:
             # Log to Supabase
@@ -297,23 +345,7 @@ def _process_message(msg: dict, unique_id: str) -> dict:
         # SAVE_CHAT_MESSAGES_ENABLED=false hands this capture to the Client-Score
         # webhook service, which applies the same rule. Only this write is
         # skipped — the notes.txt save above still runs.
-        in_own_va_group = False
-        if config.SAVE_CHAT_MESSAGES_ENABLED:
-            registered_group_id = db.get_registered_group_id(client["client_id"])
-            in_own_va_group = (
-                registered_group_id
-                and chat_id.split("@")[0] == registered_group_id
-            )
-        if in_own_va_group:
-            db.save_message(
-                client_id=client["client_id"],
-                whatsapp_group_id=chat_id,
-                sender_phone=sender_phone,
-                body=body,
-                message_timestamp=msg.get("timestamp") or "",
-                unique_id=unique_id,
-                direction="outgoing" if msg.get("from_me") else "incoming",
-            )
+        _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
 
     else:
         print(f"[main] Empty '{message_type}' message with no media/body — skipping.")
@@ -326,7 +358,7 @@ async def _handle_flag(msg: dict):
     A message was flagged in Periskope. If it came from a customer (not a VA)
     and we haven't already alerted on it, DM the client's assigned VA on Teams.
     """
-    message_id = msg.get("message_id") or msg.get("unique_id") or msg.get("id", {}).get("id") or ""
+    message_id = msg.get("message_id") or _message_unique_id(msg)
     chat_id = msg.get("chat_id", "")
     sender_phone = msg.get("sender_phone") or msg.get("author") or ""
     body = msg.get("body") or ""
@@ -334,14 +366,15 @@ async def _handle_flag(msg: dict):
     print(f"[flag] message_id={message_id!r} chat={chat_id} sender={sender_phone}")
 
     # Skip flags raised by a VA — we only alert on customer messages.
-    if db.is_va_number(sender_phone):
+    if db.is_va_number(sender_phone) or db.is_team_number(sender_phone):
         print(f"[flag] Sender '{sender_phone}' is a VA — skipping.")
         return {"status": "ok"}
 
-    # Identify the client: by sender number first, then by group.
-    client = db.find_client_by_number(sender_phone)
-    if not client and chat_id.endswith("@g.us"):
-        client = db.find_client_by_group(chat_id)
+    # Identify the client: by the GROUP first (a contact can sit in several clients' groups, so the
+    # sender's number alone can point at the wrong client), then by sender only for 1:1 chats.
+    client = db.find_client_by_group(chat_id) if chat_id.endswith("@g.us") else None
+    if not client and not chat_id.endswith("@g.us"):
+        client = db.find_client_by_number(sender_phone)
     if not client:
         print(f"[flag] Could not map flag to a client — skipping.")
         return {"status": "ok"}
@@ -365,13 +398,14 @@ async def _handle_flag(msg: dict):
         return {"status": "ok"}
 
     print(f"[flag] Alerting VA '{va['va_name']}' for '{client['client_name']}'.")
-    await teams.notify_flag(
+    sent = await teams.notify_flag(
         folder_name=folder_name,
         sender_phone=sender_phone,
         body=body,
         teams_chat_id=va["teams_chat_id"],
     )
-    db.mark_flag_notified(message_id)
+    if sent:
+        db.mark_flag_notified(message_id)  # only when the VA was actually told
     return {"status": "ok"}
 
 

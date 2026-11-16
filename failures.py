@@ -59,7 +59,41 @@ def _alert(client_name: str, reason: str) -> None:
         f"Details: {config.FAILED_FILES_LOG} on the va-bot server. "
         f"Recover with recover_files.py once the cause is fixed."
     )
+    # Message processing runs in a worker thread; hand the async post to the server's event loop.
+    teams.run_in_loop(lambda: asyncio.get_running_loop().create_task(teams._send_teams_message(content)))
+
+
+_unlinked_alerted: dict[str, float] = {}
+UNLINKED_ALERT_EVERY_SECONDS = 6 * 3600
+
+
+def record_unlinked_group(chat_id: str, group_name: str, unique_id: str) -> None:
+    """A message arrived in a group that looks like a VA client group but is linked to no client, so it
+    was not saved. Logged every time; alerted at most once per group every 6 hours. Once someone links the
+    group (clients.whatsapp_group_id), recover its history with backfill.py / recover_files.py."""
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": "unlinked_group",
+        "client_name": group_name,
+        "chat_id": chat_id,
+        "unique_id": unique_id,
+        "filename": None,
+        "reason": "VA-looking group is not linked to any client; message not saved",
+    }
     try:
-        asyncio.get_event_loop().create_task(teams._send_teams_message(content))
-    except RuntimeError:
-        print("[failures] No running event loop; Teams alert skipped.")
+        with open(config.FAILED_FILES_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[failures] ERROR writing {config.FAILED_FILES_LOG}: {e}")
+    now = time.monotonic()
+    last = _unlinked_alerted.get(chat_id)
+    if last and now - last < UNLINKED_ALERT_EVERY_SECONDS:
+        return
+    _unlinked_alerted[chat_id] = now
+    content = (
+        f"<b>🔗 WhatsApp group not linked to a client</b><br>"
+        f"Group: {group_name} ({chat_id})<br>"
+        f"Messages here are not being saved. Link it by setting clients.whatsapp_group_id, "
+        f"or add the client's WhatsApp number as a contact so the bot links it on the next message."
+    )
+    teams.run_in_loop(lambda: asyncio.get_running_loop().create_task(teams._send_teams_message(content)))

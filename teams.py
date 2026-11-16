@@ -18,8 +18,33 @@ _pending: dict[str, asyncio.Task] = {}
 
 DEBOUNCE_SECONDS = 60
 
+# The web server's event loop, set at start-up (main.py). Message processing runs in worker threads so
+# blocking downloads never stall the server; anything async (Teams posts, debounce timers) is handed
+# back to this loop through run_in_loop().
+MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 
-async def _send_teams_message(content: str, teams_chat_id: str | None = None):
+
+def run_in_loop(fn) -> None:
+    """Call fn() on the server's event loop, from any thread. fn may create tasks."""
+    loop = MAIN_LOOP
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            print("[teams] No event loop available — notification skipped.")
+            return
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        fn()
+    else:
+        loop.call_soon_threadsafe(fn)
+
+
+async def _send_teams_message(content: str, teams_chat_id: str | None = None) -> bool:
+    """Returns True only when the post was accepted, so callers mark things notified only on success."""
     """POST to n8n webhook which forwards to Teams.
     If teams_chat_id is provided, sends to that personal chat via TEAMS_PERSONAL_WEBHOOK_URL.
     Falls back to the legacy group chat webhook otherwise.
@@ -34,15 +59,17 @@ async def _send_teams_message(content: str, teams_chat_id: str | None = None):
         label = "Teams group chat"
     else:
         print("[teams] No Teams webhook configured — skipping notification.")
-        return
+        return False
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
             resp.raise_for_status()
         print(f"[teams] Notification sent to {label}.")
+        return True
     except Exception as e:
         print(f"[teams] ERROR sending Teams notification: {e}")
+        return False
 
 
 async def notify_flag(
@@ -66,7 +93,7 @@ async def notify_flag(
         f"From: {clean_phone}<br>"
         f"Time: {now}"
     )
-    await _send_teams_message(content, teams_chat_id=teams_chat_id)
+    return await _send_teams_message(content, teams_chat_id=teams_chat_id)
 
 
 async def _debounced_notify(
@@ -94,8 +121,9 @@ async def _debounced_notify(
         f"Sender: {clean_phone}<br>"
         f"Time: {now}"
     )
-    await _send_teams_message(content, teams_chat_id=teams_chat_id)
-    mark_fn(client_id)
+    sent = await _send_teams_message(content, teams_chat_id=teams_chat_id)
+    if sent:
+        mark_fn(client_id)  # only when the VA was actually told; otherwise the next upload re-announces them
     _pending.pop(client_id, None)
 
 
@@ -113,16 +141,17 @@ def notify(
     If one is already pending, cancel it and restart the timer
     so bursts of uploads collapse into one message.
     """
-    existing = _pending.get(client_id)
-    if existing and not existing.done():
-        existing.cancel()
-
-    loop = asyncio.get_event_loop()
-    task = loop.create_task(
-        _debounced_notify(
-            client_id, client_name, folder_name, sender_phone, count_fn, mark_fn,
-            teams_chat_id=teams_chat_id,
+    def schedule():
+        existing = _pending.get(client_id)
+        if existing and not existing.done():
+            existing.cancel()
+        task = asyncio.get_running_loop().create_task(
+            _debounced_notify(
+                client_id, client_name, folder_name, sender_phone, count_fn, mark_fn,
+                teams_chat_id=teams_chat_id,
+            )
         )
-    )
-    _pending[client_id] = task
+        _pending[client_id] = task
+
+    run_in_loop(schedule)  # safe from the worker thread that processes the message
     print(f"[teams] Notification scheduled for '{client_name}' in {DEBOUNCE_SECONDS}s")

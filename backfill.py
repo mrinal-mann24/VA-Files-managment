@@ -123,7 +123,7 @@ def _already_downloaded(group_name: str, filename: str, parent_name: str = None)
     Uses the Graph API to check the exact path.
     Respects parent/child folder structure when parent_name is provided.
     """
-    from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE
+    from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE, _q
     import httpx as _httpx
     root = config.SHAREPOINT_ROOT_FOLDER.strip("/")
     safe_file = _safe_name(filename)
@@ -140,7 +140,7 @@ def _already_downloaded(group_name: str, filename: str, parent_name: str = None)
         path = f"{base}/{folder}/{safe_file}"
 
     drive_id = config.SHAREPOINT_DRIVE_ID
-    url = f"{GRAPH_BASE}/drives/{drive_id}/root:{path}"
+    url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(path)}"
     try:
         resp = _httpx.get(url, headers={"Authorization": f"Bearer {_get_token()}"}, timeout=10.0)
         return resp.status_code == 200
@@ -154,7 +154,7 @@ def _fetch_existing_notes(group_name: str, parent_name: str = None) -> str:
     Fetched once per group so we can skip re-appending note lines we already
     wrote on a previous run. Respects parent/child folder structure.
     """
-    from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE
+    from storage_sharepoint import _safe_name, _get_token, GRAPH_BASE, _q
     import httpx as _httpx
     root = config.SHAREPOINT_ROOT_FOLDER.strip("/")
     folder = _safe_name(group_name)
@@ -166,7 +166,7 @@ def _fetch_existing_notes(group_name: str, parent_name: str = None) -> str:
         path = f"{base}/{folder}/notes.txt"
 
     drive_id = config.SHAREPOINT_DRIVE_ID
-    url = f"{GRAPH_BASE}/drives/{drive_id}/root:{path}:/content"
+    url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(path)}:/content"
     try:
         resp = _httpx.get(
             url,
@@ -281,11 +281,12 @@ def list_va_groups() -> list[dict]:
 
 def fetch_all_messages(chat_id: str, gm_phone: str = None) -> list[dict]:
     """Return every message from a group, using the GM phone that can see it."""
-    # Use the GM phone that discovered this group so we can actually fetch its messages
-    headers = {
-        "authorization": f"Bearer {config.PERISKOPE_API_KEY}",
-        "x-phone": gm_phone or config.PERISKOPE_PHONE,
-    }
+    # Use the GM phone that discovered this group. For groups that are only known from Supabase
+    # (gm_phone None) send no x-phone: Periskope then searches every connected phone. The default
+    # PERISKOPE_PHONE is not a member of most VA groups and returned nothing for them.
+    headers = {"authorization": f"Bearer {config.PERISKOPE_API_KEY}"}
+    if gm_phone:
+        headers["x-phone"] = gm_phone
     messages = []
     offset = 0
     page_size = 100
@@ -350,11 +351,11 @@ def map_group_to_client(chat_id: str, group_name: str):
 
 
 def _add_group_members_as_contacts(chat_id: str, client_id: str, client_name: str, gm_phone: str = None):
-    """Fetch all group members from Periskope and add them to client_contacts."""
-    headers = {
-        "authorization": f"Bearer {config.PERISKOPE_API_KEY}",
-        "x-phone": gm_phone or config.PERISKOPE_PHONE,
-    }
+    """Fetch all group members from Periskope and add them to client_contacts (team numbers are skipped
+    inside db.add_contact, so team members never become a client's contact)."""
+    headers = {"authorization": f"Bearer {config.PERISKOPE_API_KEY}"}
+    if gm_phone:
+        headers["x-phone"] = gm_phone
     try:
         resp = httpx.get(
             f"{config.PERISKOPE_BASE_URL}/chats/{chat_id}",

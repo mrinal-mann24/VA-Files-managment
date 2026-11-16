@@ -21,12 +21,76 @@ _CLIENT_GROUP_PATTERNS = [
     re.compile(r"<>\s*VA\b", re.IGNORECASE),
     # Matches "X VA", "- VA", "<> VA" at end of name (e.g. "Goodwill fabrics X VA")
     re.compile(r"[\-<>xX]\s*VA\b\s*(?:Team|Group|Services)?\s*$", re.IGNORECASE),
+    # VA clients sold under the AiA name ("Azam <> AIA", "Rare you<>AIA"). Still needs a member who is a
+    # contact of an unmapped VA client before a group is linked, so AI Accountant product groups are not.
+    re.compile(r"<>\s*AIA\b", re.IGNORECASE),
 ]
 
+# No x-phone: Periskope then answers for every connected org phone. Pinning one phone (a GM's, which is
+# not a member of most VA groups) made group-name and member lookups return 404, so new groups could not
+# be linked to their client.
 _PERISKOPE_HEADERS = {
     "authorization": f"Bearer {config.PERISKOPE_API_KEY}",
-    "x-phone": config.PERISKOPE_PHONE,
 }
+
+
+# --- Team numbers ---------------------------------------------------------------------------------
+# vas.whatsapp_number plus the settings row 'team_whatsapp_numbers' (comma list), last 10 digits.
+# Team members are never added as client contacts and their messages count as outgoing.
+_TEAM_CACHE: dict = {"at": 0.0, "numbers": frozenset()}
+_TEAM_TTL_SECONDS = 300
+
+
+def _last10(number: str | None) -> str:
+    digits = re.sub(r"\D", "", number or "")
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def team_numbers() -> frozenset:
+    import time
+    now = time.monotonic()
+    if _TEAM_CACHE["numbers"] and now - _TEAM_CACHE["at"] < _TEAM_TTL_SECONDS:
+        return _TEAM_CACHE["numbers"]
+    found: set[str] = set()
+    try:
+        for row in _supabase.table("vas").select("whatsapp_number").execute().data or []:
+            n = _last10(row.get("whatsapp_number"))
+            if n:
+                found.add(n)
+        rows = _supabase.table("settings").select("value").eq("key", "team_whatsapp_numbers").limit(1).execute().data or []
+        for part in re.split(r"[,;\s]+", (rows[0].get("value") if rows else "") or ""):
+            n = _last10(part)
+            if n:
+                found.add(n)
+    except Exception as e:
+        print(f"[db] ERROR loading team numbers (keeping the previous list): {e}")
+        return _TEAM_CACHE["numbers"]
+    _TEAM_CACHE["numbers"] = frozenset(found)
+    _TEAM_CACHE["at"] = now
+    return _TEAM_CACHE["numbers"]
+
+
+def is_team_number(number: str | None) -> bool:
+    n = _last10(number)
+    return bool(n) and n in team_numbers()
+
+
+def is_va_group_name(name: str | None) -> bool:
+    return any(p.search(name or "") for p in _CLIENT_GROUP_PATTERNS)
+
+
+def group_is_mapped(chat_id: str) -> bool:
+    """True when ANY client (active or not) already owns this group. Such a group must never be re-linked
+    to another client through the sender / member fallbacks."""
+    try:
+        rows = (
+            _supabase.table("clients").select("client_id").eq("whatsapp_group_id", _strip(chat_id)).limit(1).execute().data
+            or []
+        )
+        return bool(rows)
+    except Exception as e:
+        print(f"[db] ERROR checking group mapping for {chat_id}: {e}")
+        return True  # fail closed: never re-link when unsure
 
 
 def _strip(whatsapp_id: str) -> str:
@@ -299,6 +363,8 @@ def add_contact(client_id: str, whatsapp_number: str, contact_name: str = None):
     bare = _strip(whatsapp_number)
     if not bare:
         return
+    if is_team_number(bare):
+        return  # team members are in every group; they must never become a client's contact
 
     try:
         resp = (
@@ -547,8 +613,13 @@ def record_flagged_message(
         }).execute()
         return True
     except Exception as e:
-        print(f"[db] Flag {message_id} already processed (or insert failed): {e}")
-        return False
+        # Only a duplicate key means "already alerted". Any other error must not swallow the alert.
+        text = str(e).lower()
+        if "duplicate key" in text or "23505" in text:
+            print(f"[db] Flag {message_id} already processed — skipping.")
+            return False
+        print(f"[db] ERROR recording flag {message_id} (alerting anyway): {e}")
+        return True
 
 
 def mark_flag_notified(message_id: str):
@@ -624,6 +695,8 @@ def find_client_by_group_members(chat_id: str) -> dict | None:
     # under some client that is already mapped — taking the first match would
     # file this new group under them.
     for raw_number in members.keys():
+        if is_team_number(raw_number):
+            continue  # a team member's number can never decide which client a group belongs to
         client = find_client_by_number(raw_number)
         if not client:
             continue

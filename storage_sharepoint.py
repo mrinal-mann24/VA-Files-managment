@@ -12,6 +12,7 @@ Drop-in replacement for storage.py — same 3 public functions:
 
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -61,6 +62,12 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {_get_token()}"}
 
 
+def _q(path: str) -> str:
+    """Percent-encode a drive path for a Graph URL (keeps '/'). Names with '#', '%' or '?' otherwise
+    break the URL and the file is silently not saved. Encoding does not change the real file name."""
+    return quote(path, safe="/")
+
+
 def _drive_url(path: str) -> str:
     """Build a Graph API URL for a path inside the VA Files drive."""
     drive_id = config.SHAREPOINT_DRIVE_ID
@@ -96,7 +103,7 @@ def ensure_client_folder(client_name: str, parent_name: str | None = None) -> st
 def _create_folder_if_missing(parent_path: str, folder_name: str):
     """POST to Graph to create a folder, silently ignoring nameAlreadyExists."""
     if parent_path:
-        url = _drive_url(f"/root:{parent_path}:/children")
+        url = _drive_url(f"/root:{_q(parent_path)}:/children")
     else:
         url = _drive_url("/root/children")
 
@@ -126,12 +133,12 @@ def _unique_upload_path(folder_path: str, filename: str) -> tuple[str, str]:
     drive_id = config.SHAREPOINT_DRIVE_ID
 
     def upload_url(name: str) -> str:
-        return f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{name}:/content"
+        return f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(f'{folder_path}/{name}')}:/content"
 
     def name_is_free(name: str) -> bool:
         """404 = free, 200 = taken. Any other status (401, 403, 429, 5xx) is an error, not "taken":
         treating it as taken used to loop forever and hang the bot."""
-        check_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{name}"
+        check_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(f'{folder_path}/{name}')}"
         resp = httpx.get(check_url, headers=_headers(), timeout=10.0)
         if resp.status_code == 404:
             return True
@@ -265,19 +272,26 @@ def save_text_note(client_name: str, text: str, parent_name: str | None = None) 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     new_line = f"[{ts}] {text}\n"
 
-    # Download existing notes.txt if it exists
-    existing_content = b""
-    get_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{notes_path}:/content"
+    # Download existing notes.txt. Only a 404 means "no notes yet". Any other failure (429, 5xx,
+    # network) must NOT be treated as empty: writing then would replace the whole notes history
+    # with one line. In that case skip this note (the message itself is still in client_messages).
+    get_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(notes_path)}:/content"
     try:
         resp = httpx.get(get_url, headers=_headers(), timeout=15.0, follow_redirects=True)
-        if resp.status_code == 200:
-            existing_content = resp.content
-    except Exception:
-        pass  # file doesn't exist yet — start fresh
+    except Exception as e:
+        print(f"[sharepoint] Could not read notes.txt ({e}) — note not written, history kept.")
+        return None
+    if resp.status_code == 200:
+        existing_content = resp.content
+    elif resp.status_code == 404:
+        existing_content = b""
+    else:
+        print(f"[sharepoint] notes.txt read failed with HTTP {resp.status_code} — note not written, history kept.")
+        return None
 
     updated_content = existing_content + new_line.encode("utf-8")
 
-    upload_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{notes_path}:/content"
+    upload_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(notes_path)}:/content"
     try:
         resp = httpx.put(
             upload_url,
