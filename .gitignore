@@ -37,3 +37,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Failed file saves (failures.py)
+failed_files.jsonl

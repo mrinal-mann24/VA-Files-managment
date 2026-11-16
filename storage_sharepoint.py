@@ -128,27 +128,32 @@ def _unique_upload_path(folder_path: str, filename: str) -> tuple[str, str]:
     def upload_url(name: str) -> str:
         return f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{name}:/content"
 
-    # Check if file exists
-    check_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{filename}"
-    resp = httpx.get(check_url, headers=_headers(), timeout=10.0)
-    if resp.status_code == 404:
+    def name_is_free(name: str) -> bool:
+        """404 = free, 200 = taken. Any other status (401, 403, 429, 5xx) is an error, not "taken":
+        treating it as taken used to loop forever and hang the bot."""
+        check_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{name}"
+        resp = httpx.get(check_url, headers=_headers(), timeout=10.0)
+        if resp.status_code == 404:
+            return True
+        if resp.status_code == 200:
+            return False
+        raise RuntimeError(f"SharePoint name check failed with HTTP {resp.status_code} for '{name}'")
+
+    if name_is_free(filename):
         return upload_url(filename), filename
 
-    # File exists — find a free suffix
+    # File exists — find a free suffix (bounded, so a bad state can never hang the bot)
     if "." in filename:
         base, ext = filename.rsplit(".", 1)
         ext = "." + ext
     else:
         base, ext = filename, ""
 
-    i = 1
-    while True:
+    for i in range(1, 201):
         new_name = f"{base}_{i}{ext}"
-        check_url = f"{GRAPH_BASE}/drives/{drive_id}/root:{folder_path}/{new_name}"
-        resp = httpx.get(check_url, headers=_headers(), timeout=10.0)
-        if resp.status_code == 404:
+        if name_is_free(new_name):
             return upload_url(new_name), new_name
-        i += 1
+    raise RuntimeError(f"No free name for '{filename}' after 200 tries")
 
 
 def _parse_timestamp(message_timestamp: str | None) -> str | None:

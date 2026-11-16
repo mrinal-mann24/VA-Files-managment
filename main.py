@@ -1,35 +1,64 @@
-from urllib.parse import unquote
+import hmac
+from collections import deque
+from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 import config
 import db
+import failures
 import storage_sharepoint as storage
 import teams
 
 app = FastAPI()
 
 # Dedup: Periskope fires the webhook once per connected GM in the group,
-# so the same message arrives 2-3× within seconds. Track the last 500
-# unique_ids and skip any repeat. An LRU-style list keeps memory bounded.
-_SEEN_IDS: list[str] = []
+# so the same message arrives 2-3× within seconds. Remember the last 500
+# unique_ids that were SAVED and skip any repeat. A message is marked seen only
+# after it was processed successfully, so if one copy fails, the next copy
+# (or Periskope's retry) gets another chance instead of being dropped.
 _SEEN_IDS_MAX = 500
+_SEEN_ORDER: deque[str] = deque()
+_SEEN_SET: set[str] = set()
 
 
-def _is_duplicate(unique_id: str) -> bool:
-    if not unique_id:
-        return False
-    if unique_id in _SEEN_IDS:
-        return True
-    _SEEN_IDS.append(unique_id)
-    if len(_SEEN_IDS) > _SEEN_IDS_MAX:
-        _SEEN_IDS.pop(0)
-    return False
+def _is_seen(unique_id: str) -> bool:
+    return bool(unique_id) and unique_id in _SEEN_SET
+
+
+def _mark_seen(unique_id: str) -> None:
+    if not unique_id or unique_id in _SEEN_SET:
+        return
+    _SEEN_ORDER.append(unique_id)
+    _SEEN_SET.add(unique_id)
+    while len(_SEEN_ORDER) > _SEEN_IDS_MAX:
+        _SEEN_SET.discard(_SEEN_ORDER.popleft())
+
+
+def _message_unique_id(msg: dict) -> str:
+    """unique_id, else id (a dict {"id": ...} or a plain string), else message_id."""
+    uid = msg.get("unique_id")
+    if uid:
+        return str(uid)
+    mid = msg.get("id")
+    if isinstance(mid, dict):
+        return str(mid.get("id") or "")
+    return str(mid or msg.get("message_id") or "")
+
+
+# Media is only downloaded from Periskope (and the storage it redirects to), never from any
+# other host a payload names, so a forged webhook cannot make the server fetch arbitrary URLs.
+_ALLOWED_MEDIA_HOSTS = {urlparse(config.PERISKOPE_MEDIA_BASE_URL).netloc.lower(), "storage.googleapis.com"}
 
 
 def _build_media_url(path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
-        return path
+        host = urlparse(path).netloc.lower()
+        if host in _ALLOWED_MEDIA_HOSTS or host.endswith(".periskope.app"):
+            return path
+        print(f"[main] Media host '{host}' is not allowed — not downloading.")
+        return ""
     return config.PERISKOPE_MEDIA_BASE_URL.rstrip("/") + path
 
 
@@ -65,13 +94,23 @@ def _resolve_filename(media_obj: dict, mimetype: str) -> str | None:
     return None  # storage.save_media will assign a timestamped name
 
 
+def _webhook_authorised(request: Request) -> bool:
+    """True when no WEBHOOK_SECRET is configured, or the caller sent it (header or ?token=)."""
+    if not config.WEBHOOK_SECRET:
+        return True
+    given = request.headers.get("x-webhook-secret") or request.query_params.get("token") or ""
+    return hmac.compare_digest(given.encode(), config.WEBHOOK_SECRET.encode())
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    print("=== Incoming Periskope event ===")
-    print(data)
+    if not _webhook_authorised(request):
+        return JSONResponse({"error": "unauthorised"}, status_code=401)
 
+    data = await request.json()
     event = data.get("event") or data.get("event_type")
+    # Log the event type only: full payloads hold client messages and must not sit in server logs.
+    print(f"=== Incoming Periskope event: {event} ===")
 
     if event == "message.flagged":
         return await _handle_flag(data.get("data", {}))
@@ -79,12 +118,37 @@ async def webhook(request: Request):
     if event != "message.created":
         return {"status": "ignored"}
 
-    msg = data.get("data", {})
-    unique_id = msg.get("unique_id") or msg.get("id", {}).get("id") or ""
-    if _is_duplicate(unique_id):
-        print(f"[main] Duplicate webhook for unique_id={unique_id!r} — skipping.")
+    msg = data.get("data", {}) or {}
+    unique_id = _message_unique_id(msg)
+    if _is_seen(unique_id):
+        print(f"[main] Already saved unique_id={unique_id!r} — skipping duplicate.")
         return {"status": "duplicate"}
 
+    try:
+        result = _process_message(msg, unique_id)
+    except Exception as e:
+        # Not marked seen: the next copy of this message (another phone) or Periskope's retry
+        # processes it again instead of it being lost.
+        print(f"[main] ERROR processing unique_id={unique_id!r}: {e}")
+        if msg.get("media"):
+            failures.record(
+                "file",
+                client_name=str(msg.get("chat_id") or ""),
+                chat_id=str(msg.get("chat_id") or ""),
+                unique_id=unique_id,
+                filename=None,
+                reason=f"exception: {e}",
+            )
+        return JSONResponse({"status": "error"}, status_code=500)
+
+    if result.get("status") == "failed":
+        return JSONResponse(result, status_code=500)
+    _mark_seen(unique_id)
+    return result
+
+
+def _process_message(msg: dict, unique_id: str) -> dict:
+    """Map the message to its client and save it. Returns {"status": "ok" | "ignored" | "failed"}."""
     chat_id = msg.get("chat_id", "")
     is_group = chat_id.endswith("@g.us")
     sender_phone = msg.get("sender_phone") or msg.get("author") or ""
@@ -167,14 +231,22 @@ async def webhook(request: Request):
         filename = _resolve_filename(media_obj, mimetype)
 
         if not raw_path:
-            print("[main] No media path — skipping.")
-            return {"status": "ok"}
+            # Periskope sometimes has not stored the file yet. Record it (so it is visible and
+            # recoverable) and fail, so the next copy of this message tries again.
+            failures.record("file", client_name=client_name, chat_id=chat_id, unique_id=unique_id,
+                            filename=filename, reason="no media path in the webhook")
+            return {"status": "failed", "reason": "no media path"}
 
         media_url = _build_media_url(raw_path)
         print(f"Media URL : {media_url}")
         print(f"Filename  : {filename}")
 
         saved = storage.save_media(folder_name, media_url, filename, parent_name)
+
+        if not saved:
+            failures.record("file", client_name=client_name, chat_id=chat_id, unique_id=unique_id,
+                            filename=filename, reason="download or SharePoint upload failed (see the log above)")
+            return {"status": "failed", "reason": "file not saved"}
 
         if saved:
             # Log to Supabase

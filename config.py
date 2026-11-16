@@ -25,6 +25,16 @@ TEAMS_PERSONAL_WEBHOOK_URL = os.getenv("TEAMS_PERSONAL_WEBHOOK_URL")  # n8n endp
 # neither service is writing. Files, notes.txt and flag alerts are unaffected.
 SAVE_CHAT_MESSAGES_ENABLED = os.getenv("SAVE_CHAT_MESSAGES_ENABLED", "true").strip().lower() != "false"
 
+# --- Webhook security ---------------------------------------------------------
+# When set, /webhook accepts only calls carrying this value in the X-Webhook-Secret header or as
+# ?token=<value> in the webhook URL. Leave it unset until Periskope is configured to send it,
+# otherwise every incoming message is rejected.
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+
+# --- Failed file saves --------------------------------------------------------
+# JSON-lines file where every file the bot could not save is recorded (see failures.py).
+FAILED_FILES_LOG = os.getenv("FAILED_FILES_LOG", "failed_files.jsonl")
+
 # --- Local storage (for testing) --------------------------------------------
 STORAGE_ROOT = os.getenv("STORAGE_ROOT", "./storage")
 
