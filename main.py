@@ -221,11 +221,17 @@ async def webhook(request: Request):
         # A known contact chatting in some other group (AIA, onboarding, a second
         # group) is NOT captured. Both directions are saved — from_me tells us
         # which side of the conversation each message is on.
-        registered_group_id = db.get_registered_group_id(client["client_id"])
-        in_own_va_group = (
-            registered_group_id
-            and chat_id.split("@")[0] == registered_group_id
-        )
+        #
+        # SAVE_CHAT_MESSAGES_ENABLED=false hands this capture to the Client-Score
+        # webhook service, which applies the same rule. Only this write is
+        # skipped — the notes.txt save above still runs.
+        in_own_va_group = False
+        if config.SAVE_CHAT_MESSAGES_ENABLED:
+            registered_group_id = db.get_registered_group_id(client["client_id"])
+            in_own_va_group = (
+                registered_group_id
+                and chat_id.split("@")[0] == registered_group_id
+            )
         if in_own_va_group:
             db.save_message(
                 client_id=client["client_id"],
