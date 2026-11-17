@@ -226,6 +226,11 @@ def save_media(
         return None
 
     folder_path = ensure_client_folder(client_name, parent_name)
+    # New files go into a date sub-folder (naming.dated_subfolder); older ones stay in the client folder.
+    day = naming.dated_subfolder(message_timestamp)
+    if day:
+        _create_folder_if_missing(folder_path, day)
+        folder_path = f"{folder_path}/{day}"
 
     if not filename:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

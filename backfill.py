@@ -56,7 +56,7 @@ _ensure_ext = naming.ensure_ext
 _resolve_filename = naming.resolve_filename
 
 
-def _already_downloaded(group_name: str, filename: str, parent_name: str = None) -> bool:
+def _already_downloaded(group_name: str, filename: str, parent_name: str = None, timestamp: str | None = None) -> bool:
     """
     Check if a file already exists in SharePoint so we don't re-upload on re-runs.
     Uses the Graph API to check the exact path.
@@ -74,9 +74,11 @@ def _already_downloaded(group_name: str, filename: str, parent_name: str = None)
         base = ""
 
     if parent_name:
-        path = f"{base}/{_safe_name(parent_name)}/{folder}/{safe_file}"
+        path = f"{base}/{_safe_name(parent_name)}/{folder}"
     else:
-        path = f"{base}/{folder}/{safe_file}"
+        path = f"{base}/{folder}"
+    day = naming.dated_subfolder(timestamp)  # same date sub-folder rule as save_media
+    path = f"{path}/{day}/{safe_file}" if day else f"{path}/{safe_file}"
 
     drive_id = config.SHAREPOINT_DRIVE_ID
     url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(path)}"
@@ -374,7 +376,7 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
             # Skip if this exact file is already in the folder (re-run safety).
             # Unlike the live bot, the backfill does NOT re-download duplicates.
             try:
-                present = bool(filename) and _already_downloaded(folder, filename, parent_name)
+                present = bool(filename) and _already_downloaded(folder, filename, parent_name, timestamp)
             except Exception as e:
                 print(f"  [backfill] Could not check '{filename}' ({type(e).__name__}); skipped, re-run later.")
                 skipped += 1

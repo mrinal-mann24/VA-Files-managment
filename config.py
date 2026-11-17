@@ -13,6 +13,9 @@ PERISKOPE_BASE_URL = os.getenv("PERISKOPE_BASE_URL", "https://api.periskope.app/
 PERISKOPE_MEDIA_BASE_URL = os.getenv("PERISKOPE_MEDIA_BASE_URL", "https://api.periskope.app")
 
 # --- Microsoft Teams --------------------------------------------------------
+# Files from WhatsApp messages on or after this IST date go into a date sub-folder (<client folder>/YYYY-MM-DD/).
+# Older files stay where they are. Blank turns date folders off.
+DATE_FOLDERS_FROM = os.getenv("DATE_FOLDERS_FROM", "2026-11-18").strip()
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")  # team group chat: failure alerts and the nightly catch-up report
 TEAMS_CHAT_ID = os.getenv("TEAMS_CHAT_ID")  # group chat ID e.g. 19:xxxx@thread.v2
 TEAMS_PERSONAL_WEBHOOK_URL = os.getenv("TEAMS_PERSONAL_WEBHOOK_URL")  # n8n endpoint for VA personal chat

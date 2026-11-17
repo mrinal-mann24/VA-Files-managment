@@ -86,6 +86,28 @@ out = sp.save_media("Alpha", "https://x/y", "bill.pdf", if_exists="skip")
 ok("catch-up upload uses 'fail if it exists'", puts and "conflictBehavior=fail" in puts[-1])
 ok("409 returns ALREADY_EXISTS and uploads nothing new", out == sp.ALREADY_EXISTS)
 
+# ---------------------------------------------------------------- date-wise folders
+config.DATE_FOLDERS_FROM = "2026-11-18"
+ok("before the switch date: client folder itself", naming.dated_subfolder("2026-11-17T12:00:00Z") == "")
+ok("from the switch date: YYYY-MM-DD (IST)", naming.dated_subfolder("2026-11-20T10:00:00Z") == "2026-11-20")
+ok("IST date is used (17 Nov 19:00 UTC is 18 Nov in India)", naming.dated_subfolder("2026-11-17T19:00:00Z") == "2026-11-18")
+config.DATE_FOLDERS_FROM = ""
+ok("blank setting turns date folders off", naming.dated_subfolder("2026-11-20T10:00:00Z") == "")
+config.DATE_FOLDERS_FROM = "2026-11-18"
+created: list[tuple] = []
+sp._create_folder_if_missing = lambda parent, name: created.append((parent, name))
+puts.clear()
+sp.httpx.put = lambda url, **k: (puts.append(url), Resp(201, js={"webUrl": "u", "id": "i"}))[1]
+sp.save_media("Alpha", "https://x/y", "bill.pdf", message_timestamp="2026-11-20T10:00:00Z", if_exists="skip")
+ok("new file goes into <client>/2026-11-20/", created[-1] == ("/Client Files/Alpha", "2026-11-20") and "/Alpha/2026-11-20/bill.pdf" in puts[-1])
+sp.save_media("Alpha", "https://x/y", "old.pdf", message_timestamp="2026-11-10T10:00:00Z", if_exists="skip")
+ok("old file stays in the client folder", "/Alpha/old.pdf" in puts[-1] and "/Alpha/2026" not in puts[-1])
+seen_urls: list[str] = []
+backfill_httpx.get = lambda url, **k: (seen_urls.append(url), Resp(404))[1]
+backfill._already_downloaded("Alpha", "bill.pdf", None, "2026-11-20T10:00:00Z")
+ok("catch-up looks in the same date folder", "/Alpha/2026-11-20/bill.pdf" in seen_urls[-1])
+backfill_httpx.get = real_get
+
 # ---------------------------------------------------------------- catch-up run
 db._TEAM_CACHE.update({"numbers": frozenset({"9741428606"}), "at": time.monotonic()})
 G1 = {"client_id": "c1", "client_name": "Alpha", "chat_id": "g1@g.us", "group_id": "g1", "folder_name": "Alpha", "parent_name": None}
@@ -124,7 +146,7 @@ class T:
 
 db._supabase.table = lambda name: T()
 rf.logged_files = lambda gid: set()
-rf.backfill._already_downloaded = lambda folder, name, parent=None: name == "old.jpg"
+rf.backfill._already_downloaded = lambda folder, name, parent=None, ts=None: name == "old.jpg"
 saved_msgs: list[dict] = []
 saved_files: list[tuple] = []
 db.save_message = lambda **k: (saved_msgs.append(k), "id")[1]

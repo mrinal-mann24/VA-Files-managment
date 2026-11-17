@@ -144,7 +144,7 @@ def find_missing_files(g: dict, media: list[dict]) -> tuple[list[tuple[dict, str
         mo = m.get("media") or {}
         mime = mo.get("mimetype") or mo.get("mime_type") or ""
         name = backfill._resolve_filename(mo, mime, m.get("timestamp") or "")
-        if name and backfill._already_downloaded(g["folder_name"], name, g["parent_name"]):
+        if name and backfill._already_downloaded(g["folder_name"], name, g["parent_name"], m.get("timestamp")):
             in_sp += 1
             if name not in have_logged:
                 logged_only += 1

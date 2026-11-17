@@ -255,7 +255,8 @@ def _process_message(msg: dict, unique_id: str) -> dict:
         print(f"Media URL : {naming.url_for_log(media_url)}")
         print(f"Filename  : {filename}")
 
-        saved = storage.save_media(folder_name, media_url, filename, parent_name)
+        # The message time picks the date sub-folder (and dates the file), the same rule catch-up uses.
+        saved = storage.save_media(folder_name, media_url, filename, parent_name, message_timestamp=msg.get("timestamp"))
 
         if not saved:
             failures.record("file", client_name=client_name, chat_id=chat_id, unique_id=unique_id,

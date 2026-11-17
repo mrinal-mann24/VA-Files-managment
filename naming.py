@@ -5,7 +5,7 @@ by UPLOAD time and the backfill by MESSAGE time, so a later catch-up saw a diffe
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
 import config
@@ -70,6 +70,26 @@ def resolve_filename(media_obj: dict, mimetype: str, timestamp: str | None) -> s
         except ValueError:
             ts = ""
     return ensure_ext(f"file_{ts}" if ts else "file", mimetype)
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def dated_subfolder(timestamp: str | None) -> str:
+    """Date sub-folder ("YYYY-MM-DD", the WhatsApp message's IST date) for a file, or "" for the client folder itself.
+    Only messages on or after config.DATE_FOLDERS_FROM get one, so files saved before the switch keep their place and
+    the live bot, catch-up, recovery and backfill always look for a file in the same folder."""
+    start = (config.DATE_FOLDERS_FROM or "").strip()
+    if not start:
+        return ""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if timestamp else datetime.now(timezone.utc)
+    except ValueError:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    day = dt.astimezone(IST).strftime("%Y-%m-%d")
+    return day if day >= start else ""
 
 
 def media_url(path: str) -> str:
