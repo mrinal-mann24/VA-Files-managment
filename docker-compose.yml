@@ -24,5 +24,20 @@ services:
       - "traefik.http.routers.vabot.tls.certresolver=letsencrypt"
       - "traefik.http.services.vabot.loadbalancer.server.url=http://127.0.0.1:8001"
 
+  # Nightly catch-up: at 02:30 IST it saves any message or file from the last 48 hours that the live webhook
+  # missed (see catchup.py). Same image and same settings as va-bot; it has no port and takes no web traffic.
+  va-bot-catchup:
+    image: va-bot
+    container_name: va-bot-catchup
+    restart: unless-stopped
+    command: ["python", "catchup.py", "--loop"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TZ=Asia/Kolkata
+    depends_on:
+      - va-bot
+
 volumes:
   va-bot-storage:

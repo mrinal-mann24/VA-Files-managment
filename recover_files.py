@@ -130,6 +130,56 @@ def logged_files(group_id: str) -> set[str]:
     return {r["file_name"] for r in rows if r.get("file_name")}
 
 
+def media_messages(msgs: list[dict]) -> list[dict]:
+    """Messages that carry a downloadable file."""
+    return [m for m in msgs if (m.get("media") or {}).get("path") or (m.get("media") or {}).get("url")]
+
+
+def find_missing_files(g: dict, media: list[dict]) -> tuple[list[tuple[dict, str, str]], int, int]:
+    """(missing [(message, filename, mimetype)], already in SharePoint, in SharePoint but not logged).
+    A file counts as present when the same name is already in the client's folder (the live bot's folder)."""
+    have_logged = logged_files(g["group_id"])
+    missing, in_sp, logged_only = [], 0, 0
+    for m in media:
+        mo = m.get("media") or {}
+        mime = mo.get("mimetype") or mo.get("mime_type") or ""
+        name = backfill._resolve_filename(mo, mime, m.get("timestamp") or "")
+        if name and backfill._already_downloaded(g["folder_name"], name, g["parent_name"]):
+            in_sp += 1
+            if name not in have_logged:
+                logged_only += 1
+            continue
+        missing.append((m, name, mime))
+    return missing, in_sp, logged_only
+
+
+def save_missing_file(g: dict, m: dict, name: str) -> bool:
+    """Download one missed file to the client's folder (backdated) and log it as already notified. True on success."""
+    mo = m.get("media") or {}
+    url = backfill._build_media_url(mo.get("path") or mo.get("url") or "")
+    web_url = storage.save_media(g["folder_name"], url, name, g["parent_name"], message_timestamp=m.get("timestamp"))
+    if not web_url:
+        return False
+    try:
+        db._supabase.table("document_uploads").insert({
+            "client_id": g["client_id"],
+            "client_name": g["client_name"],
+            "folder_name": g["folder_name"],
+            "group_id": g["group_id"],
+            "group_name": g["folder_name"],
+            "sender_phone": db._strip(m.get("sender_phone") or ""),
+            "file_name": storage._safe_name(name) if name else name,
+            "file_type": (m.get("message_type") or "").lower(),
+            "file_size": mo.get("size") or 0,
+            "uploaded_at": m.get("timestamp"),
+            "notified": True,
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"    [recover] uploaded but not logged ({name}): {e}")
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--window", action="append", required=True, help="IST dates FROM:TO inclusive, e.g. 2026-11-11:2026-11-15")
@@ -147,24 +197,13 @@ def main():
         media = []
         for start, end in windows:
             try:
-                media += [m for m in fetch_window(g["chat_id"], start, end) if (m.get("media") or {}).get("path") or (m.get("media") or {}).get("url")]
+                media += media_messages(fetch_window(g["chat_id"], start, end))
             except Exception as e:
                 print(f"  [recover] {g['client_name']}: Periskope error {e}")
         if not media:
             continue
-        have_logged = logged_files(g["group_id"])
-        missing, logged_only = [], 0
-        for m in media:
-            mo = m.get("media") or {}
-            mime = mo.get("mimetype") or mo.get("mime_type") or ""
-            name = backfill._resolve_filename(mo, mime, m.get("timestamp") or "")
-            in_sp = bool(name) and backfill._already_downloaded(g["folder_name"], name, g["parent_name"])
-            if in_sp:
-                totals["in_sharepoint"] += 1
-                if name not in have_logged:
-                    logged_only += 1
-                continue
-            missing.append((m, name, mime))
+        missing, in_sp, logged_only = find_missing_files(g, media)
+        totals["in_sharepoint"] += in_sp
         totals["media"] += len(media)
         totals["missing"] += len(missing)
         totals["logged_only"] += logged_only
@@ -174,30 +213,7 @@ def main():
         if not args.apply:
             continue
         for m, name, mime in missing:
-            mo = m.get("media") or {}
-            url = backfill._build_media_url(mo.get("path") or mo.get("url") or "")
-            web_url = storage.save_media(g["folder_name"], url, name, g["parent_name"], message_timestamp=m.get("timestamp"))
-            if not web_url:
-                totals["failed"] += 1
-                continue
-            try:
-                db._supabase.table("document_uploads").insert({
-                    "client_id": g["client_id"],
-                    "client_name": g["client_name"],
-                    "folder_name": g["folder_name"],
-                    "group_id": g["group_id"],
-                    "group_name": g["folder_name"],
-                    "sender_phone": db._strip(m.get("sender_phone") or ""),
-                    "file_name": storage._safe_name(name) if name else name,
-                    "file_type": (m.get("message_type") or "").lower(),
-                    "file_size": mo.get("size") or 0,
-                    "uploaded_at": m.get("timestamp"),
-                    "notified": True,
-                }).execute()
-                totals["recovered"] += 1
-            except Exception as e:
-                totals["failed"] += 1
-                print(f"    [recover] uploaded but not logged ({name}): {e}")
+            totals["recovered" if save_missing_file(g, m, name) else "failed"] += 1
 
     print(f"[recover] {mode} done: {totals}")
 
