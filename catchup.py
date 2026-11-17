@@ -6,7 +6,11 @@ For every WhatsApp group linked to an ACTIVE client, over the last N hours (defa
      the same way the live bot saves it (dedup_hash = WhatsApp unique_id, team or client from the team list).
   2. Files: every file Periskope has that is not in the client's SharePoint folder is uploaded there (backdated to the
      WhatsApp time) and logged in document_uploads as already notified, so old files never trigger "new upload" alerts.
-Both steps skip anything already saved, so a run can be repeated safely and never creates duplicates.
+Both steps skip anything already saved, so a run can be repeated safely and never creates duplicates: files are
+uploaded under their exact name only ("fail if it exists"), and a SharePoint check that errors skips the group until
+the next night instead of guessing "missing".
+Messages are skipped when SAVE_CHAT_MESSAGES_ENABLED is off (another service owns client_messages then). Recovered
+messages are not appended to notes.txt: client_messages is the record Shadow reads; notes.txt is a convenience copy.
 A Teams message is sent only when something was recovered or a group failed, so a quiet night sends nothing.
 
 Usage:
@@ -21,7 +25,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 
-import config  # noqa: F401 - settings load from .env on import
+import config
 import db
 import recover_files as rf
 import teams
@@ -92,10 +96,10 @@ def run(hours: int = DEFAULT_HOURS, apply: bool = False, only_group: str | None 
         summary["groups"] += 1
         try:
             msgs = fetch_with_retry(g["chat_id"], start, end)
-            lost = missing_messages(msgs)
+            lost = missing_messages(msgs) if config.SAVE_CHAT_MESSAGES_ENABLED else []
             missing_files, _in_sp, _logged_only = rf.find_missing_files(g, rf.media_messages(msgs))
         except Exception as e:  # noqa: BLE001 - one bad group never stops the others
-            summary["errors"].append(f"{g['client_name']}: {str(e)[:120]}")
+            summary["errors"].append(f"{g['client_name']}: {type(e).__name__}")
             continue
         summary["messages_missing"] += len(lost)
         summary["files_missing"] += len(missing_files)
@@ -104,9 +108,10 @@ def run(hours: int = DEFAULT_HOURS, apply: bool = False, only_group: str | None 
         saved_msgs = sum(1 for m in lost if save_message(g, m))
         saved_files = failed_files = 0
         for m, name, _mime in missing_files:
-            if rf.save_missing_file(g, m, name):
+            outcome = rf.save_missing_file(g, m, name)  # "saved" | "present" (live bot saved it meanwhile) | "failed"
+            if outcome == "saved":
                 saved_files += 1
-            else:
+            elif outcome == "failed":
                 failed_files += 1
         summary["messages_saved"] += saved_msgs
         summary["files_saved"] += saved_files
@@ -139,8 +144,10 @@ def report(summary: dict) -> str | None:
 
 def send_report(summary: dict) -> None:
     text = report(summary)
-    if text:
-        asyncio.run(teams._send_teams_message(text))
+    if text and not asyncio.run(teams._send_teams_message(text)):
+        print("[catchup] ERROR: the Teams report could not be sent (is TEAMS_WEBHOOK_URL set?). Summary: "
+              f"{summary['messages_saved']} message(s), {summary['files_saved']} file(s) recovered, "
+              f"{summary['files_failed']} failed, {len(summary['errors'])} group error(s).")
 
 
 def seconds_until_next_run(now: datetime | None = None) -> float:
@@ -163,8 +170,8 @@ def loop(hours: int) -> None:
                   f"{s['files_failed']} failed, {len(s['errors'])} group error(s), {s['groups']} groups")
             send_report(s)
         except Exception as e:  # noqa: BLE001 - never let one bad night stop the scheduler
-            print(f"[catchup] run failed: {e}")
-            asyncio.run(teams._send_teams_message(f"<b>va-bot nightly catch-up failed</b><br>{str(e)[:300]}"))
+            print(f"[catchup] run failed: {type(e).__name__}: {str(e)[:200]}")
+            asyncio.run(teams._send_teams_message(f"<b>va-bot nightly catch-up failed</b><br>{type(e).__name__}. See the va-bot-catchup container log."))
         time.sleep(60)  # never run twice in the same minute
 
 

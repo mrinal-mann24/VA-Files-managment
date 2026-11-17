@@ -26,6 +26,7 @@ import httpx
 
 import config
 import db
+import naming
 import storage_sharepoint as storage
 
 # ---------------------------------------------------------------------------
@@ -41,80 +42,18 @@ _HEADERS = {
 # main.py never disagree about what counts as a VA group.
 _CLIENT_GROUP_PATTERNS = db._CLIENT_GROUP_PATTERNS
 
-MIME_TO_EXT = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-    "video/mp4": ".mp4",
-    "video/3gpp": ".3gp",
-    "audio/mpeg": ".mp3",
-    "audio/ogg": ".ogg",
-    "audio/mp4": ".m4a",
-    "application/pdf": ".pdf",
-    "application/msword": ".doc",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "application/vnd.ms-excel": ".xls",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-}
 
 
 def _is_va_group(name: str) -> bool:
     return any(p.search(name or "") for p in _CLIENT_GROUP_PATTERNS)
 
 
-def _build_media_url(path: str) -> str:
-    if not path:
-        return ""
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return config.PERISKOPE_MEDIA_BASE_URL.rstrip("/") + path
-
-
-def _ext_from_mime(mimetype: str) -> str:
-    return MIME_TO_EXT.get(mimetype, "")
-
-
-def _ensure_ext(name: str, mimetype: str) -> str:
-    """Append an extension from the mimetype if the name has none."""
-    if name and "." not in os.path.basename(name):
-        ext = _ext_from_mime(mimetype)
-        if ext:
-            return f"{name}{ext}"
-    return name
-
-
-def _resolve_filename(media_obj, mimetype, timestamp):
-    """
-    Best filename for a media file, in priority order:
-      1. media.filename / media.file_name (the real WhatsApp filename)
-      2. the filename at the end of the media URL path
-      3. a timestamped fallback (file_<ts>)
-    Never uses the message caption. Extension from the mimetype is always
-    ensured so files open correctly.
-    """
-    # 1. Explicit filename
-    name = media_obj.get("filename") or media_obj.get("file_name")
-    if name:
-        return _ensure_ext(name, mimetype)
-
-    # 2. Filename from the URL path
-    raw_path = media_obj.get("path") or media_obj.get("url") or ""
-    if raw_path:
-        tail = unquote(raw_path.split("?")[0].rstrip("/").split("/")[-1])
-        if tail and "." in tail:
-            return _ensure_ext(tail, mimetype)
-
-    # 3. Timestamped fallback
-    ts = ""
-    if timestamp:
-        try:
-            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            ts = dt.strftime("%Y%m%d_%H%M%S")
-        except Exception:
-            ts = ""
-    base = f"file_{ts}" if ts else "file"
-    return _ensure_ext(base, mimetype)
+# One naming rule for live, backfill, recovery and catch-up (naming.py). Kept under the old names for callers.
+MIME_TO_EXT = naming.MIME_TO_EXT
+_build_media_url = naming.media_url
+_ext_from_mime = naming.ext_from_mime
+_ensure_ext = naming.ensure_ext
+_resolve_filename = naming.resolve_filename
 
 
 def _already_downloaded(group_name: str, filename: str, parent_name: str = None) -> bool:
@@ -141,11 +80,14 @@ def _already_downloaded(group_name: str, filename: str, parent_name: str = None)
 
     drive_id = config.SHAREPOINT_DRIVE_ID
     url = f"{GRAPH_BASE}/drives/{drive_id}/root:{_q(path)}"
-    try:
-        resp = _httpx.get(url, headers={"Authorization": f"Bearer {_get_token()}"}, timeout=10.0)
-        return resp.status_code == 200
-    except Exception:
+    # 200 = present, 404 = absent. Anything else (timeout, 429, 5xx) RAISES: treating an error as "absent" made the
+    # caller upload the file again as name_1.ext.
+    resp = _httpx.get(url, headers={"Authorization": f"Bearer {_get_token()}"}, timeout=10.0)
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
         return False
+    raise RuntimeError(f"SharePoint check failed with HTTP {resp.status_code} for '{safe_file}'")
 
 
 def _fetch_existing_notes(group_name: str, parent_name: str = None) -> str:
@@ -431,7 +373,13 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
 
             # Skip if this exact file is already in the folder (re-run safety).
             # Unlike the live bot, the backfill does NOT re-download duplicates.
-            if filename and _already_downloaded(folder, filename, parent_name):
+            try:
+                present = bool(filename) and _already_downloaded(folder, filename, parent_name)
+            except Exception as e:
+                print(f"  [backfill] Could not check '{filename}' ({type(e).__name__}); skipped, re-run later.")
+                skipped += 1
+                continue
+            if present:
                 already_have += 1
                 continue
 

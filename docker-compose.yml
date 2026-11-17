@@ -15,6 +15,10 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8001:8000"
+    # Settings come from .env next to this file (optional here so an existing setup that passes them another way keeps working).
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - va-bot-storage:/data/storage
     labels:
@@ -31,6 +35,7 @@ services:
     container_name: va-bot-catchup
     restart: unless-stopped
     command: ["python", "catchup.py", "--loop"]
+    init: true   # forwards stop signals, so `docker compose stop` ends it at once instead of after 10 s
     env_file:
       - path: .env
         required: false

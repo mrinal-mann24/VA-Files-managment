@@ -58,10 +58,29 @@ auto-mapping, folder name = group name, office server + Cloudflare Tunnel plan) 
 | `main.py` | FastAPI webhook. 3-step lookup → save file → log → notify Teams. |
 | `config.py` | All credentials/settings. Env vars first, hardcoded fallback. |
 | `db.py` | Supabase: lookups by number/group/members, update group, add contact, log upload, notify helpers. |
-| `storage.py` | Local disk backend (test). Same 3 signatures for easy swap to network share. |
-| `messaging.py` | Periskope outbound API (not used in current flow — no replies needed). |
-| `teams.py` | Teams Incoming Webhook notifications with 60s debounce. |
-| `requirements.txt` | fastapi, uvicorn, supabase, httpx |
+| `storage_sharepoint.py` | SharePoint (Microsoft Graph) folders, file uploads (`if_exists="rename"` live, `"skip"` for catch-up) and notes.txt. |
+| `naming.py` | The one rule for a file's name (`resolve_filename`, by WhatsApp message time) and its download URL (Periskope hosts only), shared by live, backfill, recovery and catch-up. |
+| `catchup.py` | Nightly catch-up (02:30 IST, `va-bot-catchup` container): saves messages and files from the last 48 hours the webhook missed. Safe to re-run. |
+| `recover_files.py` | Manual file recovery for given date windows (same helpers as catch-up). |
+| `backfill.py` | Manual full-history import for a newly linked group. |
+| `failures.py` | Logs files that could not be saved and alerts Teams (throttled). |
+| `teams.py` | Teams notifications through n8n: VA personal chat (uploads, flags) and the team group chat (alerts, catch-up report). |
+| `tests/test_catchup.py` | Offline tests for the duplicate protections: `python tests/test_catchup.py`. |
+| `requirements.txt` | Pinned versions (tested 17 Nov 2026). |
+
+`storage.py` (local-disk backend) and `messaging.py` (Periskope outbound) were removed on 17 Nov 2026: nothing used them.
+One-off scripts kept for reference: `nyvu_setup.py`, `backfill_chats.py`, `list_groups.py`, `check_flagged_messages.py`.
+
+### Never a duplicate (17 Nov 2026)
+- **One folder name:** `db.folder_name_for` (stored `whatsapp_group_name`, else `client_name`; never WhatsApp's live name).
+- **One file name:** `naming.resolve_filename` (live and catch-up pick the same name, including files that have none).
+- **Live webhook:** a message being processed is in `_IN_FLIGHT`, so the 2-3 copies Periskope sends never run at once;
+  it is marked seen only after it was saved.
+- **Catch-up and recovery:** a SharePoint check that errors means "try tomorrow", never "missing"; uploads use the exact
+  name with "fail if it exists", so a re-run can never create `name_1`. Messages dedup on `dedup_hash` (WhatsApp id).
+- **Known limit:** files are matched by name, so a second file with the same name on another day is not recovered by
+  catch-up (the live bot still saves it as `name_1`).
+- **Settings:** the `va-bot-catchup` service needs the same `.env` as `va-bot`, including `TEAMS_WEBHOOK_URL` for its report.
 
 ### Key function signatures
 - `db.find_client_by_number(whatsapp_number)` → `{client_id, client_name, folder_name, whatsapp_group_id}` or `None`

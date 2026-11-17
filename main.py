@@ -1,8 +1,7 @@
 import hmac
 from collections import deque
-from urllib.parse import unquote, urlparse
-
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -11,16 +10,20 @@ from fastapi.responses import JSONResponse
 import config
 import db
 import failures
+import naming
 import storage_sharepoint as storage
 import teams
 
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def _remember_event_loop():
+@asynccontextmanager
+async def _lifespan(_app):
     # Message processing runs in worker threads; Teams timers and posts are handed back to this loop.
     teams.MAIN_LOOP = asyncio.get_running_loop()
+    if not config.WEBHOOK_SECRET:
+        print("[main] WARNING: WEBHOOK_SECRET is not set, so anyone who knows the URL can post to /webhook.")
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # Dedup: Periskope fires the webhook once per connected GM in the group,
 # so the same message arrives 2-3× within seconds. Remember the last 500
@@ -30,6 +33,9 @@ async def _remember_event_loop():
 _SEEN_IDS_MAX = 500
 _SEEN_ORDER: deque[str] = deque()
 _SEEN_SET: set[str] = set()
+# unique_ids being processed right now. The 2-3 copies Periskope sends arrive within seconds, often before the
+# first copy has finished; without this they all ran at once (a second "_1" file, a doubled notes line).
+_IN_FLIGHT: set[str] = set()
 
 
 def _is_seen(unique_id: str) -> bool:
@@ -54,53 +60,6 @@ def _message_unique_id(msg: dict) -> str:
     if isinstance(mid, dict):
         return str(mid.get("id") or "")
     return str(mid or msg.get("message_id") or "")
-
-
-# Media is only downloaded from Periskope (and the storage it redirects to), never from any
-# other host a payload names, so a forged webhook cannot make the server fetch arbitrary URLs.
-_ALLOWED_MEDIA_HOSTS = {urlparse(config.PERISKOPE_MEDIA_BASE_URL).netloc.lower(), "storage.googleapis.com"}
-
-
-def _build_media_url(path: str) -> str:
-    if path.startswith("http://") or path.startswith("https://"):
-        host = urlparse(path).netloc.lower()
-        if host in _ALLOWED_MEDIA_HOSTS or host.endswith(".periskope.app"):
-            return path
-        print(f"[main] Media host '{host}' is not allowed — not downloading.")
-        return ""
-    return config.PERISKOPE_MEDIA_BASE_URL.rstrip("/") + path
-
-
-def _ensure_ext(name: str, mimetype: str) -> str:
-    """Append an extension from the mimetype if the name has none."""
-    import os
-    if name and "." not in os.path.basename(name):
-        ext = _ext_from_mime(mimetype)
-        if ext:
-            return f"{name}{ext}"
-    return name
-
-
-def _resolve_filename(media_obj: dict, mimetype: str) -> str | None:
-    """
-    Best filename for a media file, in priority order:
-      1. media.filename (the real WhatsApp filename)
-      2. filename at the end of the media URL path
-    Never uses the message caption. Returns None if neither is usable, in which
-    case storage.save_media assigns a timestamped name. Extension is ensured
-    from the mimetype so files open correctly.
-    """
-    name = media_obj.get("filename") or media_obj.get("file_name")
-    if name:
-        return _ensure_ext(name, mimetype)
-
-    raw_path = media_obj.get("path") or media_obj.get("url") or ""
-    if raw_path:
-        tail = unquote(raw_path.split("?")[0].rstrip("/").split("/")[-1])
-        if tail and "." in tail:
-            return _ensure_ext(tail, mimetype)
-
-    return None  # storage.save_media will assign a timestamped name
 
 
 def _webhook_authorised(request: Request) -> bool:
@@ -132,7 +91,19 @@ async def webhook(request: Request):
     if _is_seen(unique_id):
         print(f"[main] Already saved unique_id={unique_id!r} — skipping duplicate.")
         return {"status": "duplicate"}
+    if unique_id and unique_id in _IN_FLIGHT:
+        print(f"[main] unique_id={unique_id!r} is being processed right now, skipping this copy.")
+        return {"status": "duplicate"}
+    if unique_id:
+        _IN_FLIGHT.add(unique_id)
+    try:
+        return await _process_once(msg, unique_id)
+    finally:
+        # Always released, even if the request is cancelled mid-way, so a message can never stay blocked.
+        _IN_FLIGHT.discard(unique_id)
 
+
+async def _process_once(msg: dict, unique_id: str):
     try:
         # Downloads, uploads and database calls block; run them in a worker thread so one slow file
         # never stops the server from answering other webhooks.
@@ -271,7 +242,7 @@ def _process_message(msg: dict, unique_id: str) -> dict:
         mimetype = media_obj.get("mimetype", "")
         file_size = media_obj.get("size") or 0
 
-        filename = _resolve_filename(media_obj, mimetype)
+        filename = naming.resolve_filename(media_obj, mimetype, msg.get("timestamp"))
 
         if not raw_path:
             # Periskope sometimes has not stored the file yet. Record it (so it is visible and
@@ -280,8 +251,8 @@ def _process_message(msg: dict, unique_id: str) -> dict:
                             filename=filename, reason="no media path in the webhook")
             return {"status": "failed", "reason": "no media path"}
 
-        media_url = _build_media_url(raw_path)
-        print(f"Media URL : {media_url}")
+        media_url = naming.media_url(raw_path)
+        print(f"Media URL : {naming.url_for_log(media_url)}")
         print(f"Filename  : {filename}")
 
         saved = storage.save_media(folder_name, media_url, filename, parent_name)
@@ -296,34 +267,33 @@ def _process_message(msg: dict, unique_id: str) -> dict:
         if body.strip():
             _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
 
-        if saved:
-            # Log to Supabase
-            db.log_upload(
-                client_id=client["client_id"],
-                client_name=client_name,
-                folder_name=folder_name,
-                group_id=chat_id,
-                group_name=folder_name,
-                sender_phone=sender_phone,
-                file_name=filename or "",
-                file_type=message_type,
-                file_size=file_size,
-            )
-            # Look up assigned VA's Teams personal chat
-            va = db.get_va_for_client(client["client_id"])
-            teams_chat_id = va["teams_chat_id"] if va else None
-            if va:
-                print(f"[main] Notifying VA '{va['va_name']}' via personal Teams chat.")
-            # Schedule Teams notification (debounced 60s)
-            teams.notify(
-                client_id=client["client_id"],
-                client_name=client_name,
-                folder_name=folder_name,
-                sender_phone=sender_phone,
-                count_fn=db.get_unnotified_count,
-                mark_fn=db.mark_notified,
-                teams_chat_id=teams_chat_id,
-            )
+        # Log to Supabase
+        db.log_upload(
+            client_id=client["client_id"],
+            client_name=client_name,
+            folder_name=folder_name,
+            group_id=chat_id,
+            group_name=folder_name,
+            sender_phone=sender_phone,
+            file_name=filename or "",
+            file_type=message_type,
+            file_size=file_size,
+        )
+        # Look up assigned VA's Teams personal chat
+        va = db.get_va_for_client(client["client_id"])
+        teams_chat_id = va["teams_chat_id"] if va else None
+        if va:
+            print(f"[main] Notifying VA '{va['va_name']}' via personal Teams chat.")
+        # Schedule Teams notification (debounced 60s)
+        teams.notify(
+            client_id=client["client_id"],
+            client_name=client_name,
+            folder_name=folder_name,
+            sender_phone=sender_phone,
+            count_fn=db.get_unnotified_count,
+            mark_fn=db.mark_notified,
+            teams_chat_id=teams_chat_id,
+        )
 
     elif body:
         # No media — save any text content (plain text, chat, or a caption on a
@@ -409,21 +379,3 @@ async def _handle_flag(msg: dict):
     return {"status": "ok"}
 
 
-def _ext_from_mime(mimetype: str) -> str:
-    mapping = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "video/mp4": ".mp4",
-        "video/3gpp": ".3gp",
-        "audio/mpeg": ".mp3",
-        "audio/ogg": ".ogg",
-        "audio/mp4": ".m4a",
-        "application/pdf": ".pdf",
-        "application/msword": ".doc",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "application/vnd.ms-excel": ".xls",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-    }
-    return mapping.get(mimetype, "")

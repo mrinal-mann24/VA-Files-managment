@@ -264,6 +264,9 @@ def find_client_by_group(chat_id: str) -> dict | None:
             _supabase.table("clients")
             .select("client_id, client_name, whatsapp_group_id, whatsapp_group_name, parent_client_id, status")
             .eq("whatsapp_group_id", group_id)
+            # A group linked to a parent AND a subgroup resolves to the subgroup, the same choice recover_files and
+            # catchup make, so live files and recovered files land in the same folder.
+            .order("parent_client_id", nullsfirst=False)
             .limit(1)
             .execute()
         )
@@ -497,9 +500,12 @@ def save_message(
         print(f"[db] Saved message to knowledge base (id={message_id}, dedup={dedup_hash[:12]}...)")
         return message_id
     except Exception as e:
-        # Includes the expected duplicate-key case (dedup_hash already present)
-        # as well as any real error. Either way, never raise — logging only.
-        print(f"[db] Skipped/failed knowledge-base message insert (dedup={dedup_hash[:12]}...): {e}")
+        # Never raise (this write must not break the file save). A duplicate is normal; anything else is a real loss
+        # for now, which the nightly catch-up (catchup.py) recovers.
+        if "23505" in str(e) or "duplicate key" in str(e).lower():
+            print(f"[db] Message already saved (dedup={dedup_hash[:12]}...).")
+        else:
+            print(f"[db] ERROR saving message (dedup={dedup_hash[:12]}...): {type(e).__name__}; the nightly catch-up will retry.")
         return None
 
 

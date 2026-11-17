@@ -153,13 +153,19 @@ def find_missing_files(g: dict, media: list[dict]) -> tuple[list[tuple[dict, str
     return missing, in_sp, logged_only
 
 
-def save_missing_file(g: dict, m: dict, name: str) -> bool:
-    """Download one missed file to the client's folder (backdated) and log it as already notified. True on success."""
+def save_missing_file(g: dict, m: dict, name: str) -> str:
+    """Download one missed file to the client's folder (backdated) under its exact name and log it as already
+    notified. Returns "saved", "present" (the live bot saved it meanwhile: nothing uploaded) or "failed"."""
     mo = m.get("media") or {}
     url = backfill._build_media_url(mo.get("path") or mo.get("url") or "")
-    web_url = storage.save_media(g["folder_name"], url, name, g["parent_name"], message_timestamp=m.get("timestamp"))
+    if not url:
+        return "failed"
+    web_url = storage.save_media(g["folder_name"], url, name, g["parent_name"],
+                                 message_timestamp=m.get("timestamp"), if_exists="skip")
+    if web_url == storage.ALREADY_EXISTS:
+        return "present"
     if not web_url:
-        return False
+        return "failed"
     try:
         db._supabase.table("document_uploads").insert({
             "client_id": g["client_id"],
@@ -174,10 +180,10 @@ def save_missing_file(g: dict, m: dict, name: str) -> bool:
             "uploaded_at": m.get("timestamp"),
             "notified": True,
         }).execute()
-        return True
     except Exception as e:
-        print(f"    [recover] uploaded but not logged ({name}): {e}")
-        return False
+        # The file IS saved; only the log row is missing. Report it as saved so nobody retries an upload.
+        print(f"    [recover] uploaded but not logged in document_uploads ({name}): {type(e).__name__}")
+    return "saved"
 
 
 def main():
@@ -202,7 +208,11 @@ def main():
                 print(f"  [recover] {g['client_name']}: Periskope error {e}")
         if not media:
             continue
-        missing, in_sp, logged_only = find_missing_files(g, media)
+        try:
+            missing, in_sp, logged_only = find_missing_files(g, media)
+        except Exception as e:
+            print(f"  [recover] {g['client_name']}: SharePoint check failed ({type(e).__name__}); skipped, re-run later.")
+            continue
         totals["in_sharepoint"] += in_sp
         totals["media"] += len(media)
         totals["missing"] += len(missing)
@@ -213,7 +223,8 @@ def main():
         if not args.apply:
             continue
         for m, name, mime in missing:
-            totals["recovered" if save_missing_file(g, m, name) else "failed"] += 1
+            outcome = save_missing_file(g, m, name)
+            totals[{"saved": "recovered", "present": "in_sharepoint", "failed": "failed"}[outcome]] += 1
 
     print(f"[recover] {mode} done: {totals}")
 

@@ -13,7 +13,7 @@ PERISKOPE_BASE_URL = os.getenv("PERISKOPE_BASE_URL", "https://api.periskope.app/
 PERISKOPE_MEDIA_BASE_URL = os.getenv("PERISKOPE_MEDIA_BASE_URL", "https://api.periskope.app")
 
 # --- Microsoft Teams --------------------------------------------------------
-TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")  # legacy, no longer used
+TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL")  # team group chat: failure alerts and the nightly catch-up report
 TEAMS_CHAT_ID = os.getenv("TEAMS_CHAT_ID")  # group chat ID e.g. 19:xxxx@thread.v2
 TEAMS_PERSONAL_WEBHOOK_URL = os.getenv("TEAMS_PERSONAL_WEBHOOK_URL")  # n8n endpoint for VA personal chat
 

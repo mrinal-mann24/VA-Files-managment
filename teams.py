@@ -44,10 +44,10 @@ def run_in_loop(fn) -> None:
 
 
 async def _send_teams_message(content: str, teams_chat_id: str | None = None) -> bool:
-    """Returns True only when the post was accepted, so callers mark things notified only on success."""
-    """POST to n8n webhook which forwards to Teams.
-    If teams_chat_id is provided, sends to that personal chat via TEAMS_PERSONAL_WEBHOOK_URL.
-    Falls back to the legacy group chat webhook otherwise.
+    """POST to the n8n webhook that forwards to Teams. Returns True only when the post was accepted, so callers
+    mark things notified only on success.
+    teams_chat_id given: that VA's personal chat (TEAMS_PERSONAL_WEBHOOK_URL). Otherwise: the team group chat
+    (TEAMS_WEBHOOK_URL), used for failure alerts and the nightly catch-up report.
     """
     if teams_chat_id and config.TEAMS_PERSONAL_WEBHOOK_URL:
         url = config.TEAMS_PERSONAL_WEBHOOK_URL
@@ -68,7 +68,9 @@ async def _send_teams_message(content: str, teams_chat_id: str | None = None) ->
         print(f"[teams] Notification sent to {label}.")
         return True
     except Exception as e:
-        print(f"[teams] ERROR sending Teams notification: {e}")
+        # Never print the exception text: it contains the full webhook URL (and its token).
+        print(f"[teams] ERROR sending Teams notification to {label}: {type(e).__name__} "
+              f"{getattr(getattr(e, 'response', None), 'status_code', '')}")
         return False
 
 
@@ -108,7 +110,8 @@ async def _debounced_notify(
     """Wait DEBOUNCE_SECONDS, then send one Teams message with the total count."""
     await asyncio.sleep(DEBOUNCE_SECONDS)
 
-    count = count_fn(client_id)
+    # Supabase calls block; run them off the event loop so webhooks keep being answered meanwhile.
+    count = await asyncio.to_thread(count_fn, client_id)
     if count == 0:
         return
 
@@ -123,7 +126,7 @@ async def _debounced_notify(
     )
     sent = await _send_teams_message(content, teams_chat_id=teams_chat_id)
     if sent:
-        mark_fn(client_id)  # only when the VA was actually told; otherwise the next upload re-announces them
+        await asyncio.to_thread(mark_fn, client_id)  # only when the VA was actually told; otherwise the next upload re-announces them
     _pending.pop(client_id, None)
 
 

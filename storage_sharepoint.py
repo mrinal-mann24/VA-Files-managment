@@ -17,6 +17,10 @@ from urllib.parse import quote
 import httpx
 
 import config
+import naming
+
+# save_media(..., if_exists="skip") returns this when the exact name is already in the folder.
+ALREADY_EXISTS = "already-exists"
 
 _token_cache: dict = {}  # {"access_token": ..., "expires_at": ...}
 
@@ -206,12 +210,16 @@ def save_media(
     filename: str | None,
     parent_name: str | None = None,
     message_timestamp: str | None = None,
+    if_exists: str = "rename",
 ) -> str | None:
     """
     Download file from Periskope and upload it to SharePoint.
     When message_timestamp is given (the WhatsApp message's own timestamp),
     the uploaded file's created/modified date is backdated to it instead of
     showing today's (upload) date.
+    if_exists="rename" (live bot): a taken name gets _1, _2 (a real second file with the same name).
+    if_exists="skip" (catch-up, recovery): upload under the exact name only; if it is already there, return
+    ALREADY_EXISTS and upload nothing, so a re-run can never create a name_1 copy.
     """
     if not url:
         print("[sharepoint] No media URL — skipping.")
@@ -226,17 +234,22 @@ def save_media(
     filename = _safe_name(filename)
 
     try:
-        print(f"[sharepoint] Downloading {url}")
+        print(f"[sharepoint] Downloading {naming.url_for_log(url)}")
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
             file_bytes = resp.content
     except Exception as e:
-        print(f"[sharepoint] ERROR downloading media: {e}")
+        print(f"[sharepoint] ERROR downloading media: {type(e).__name__} {getattr(getattr(e, 'response', None), 'status_code', '')}")
         return None
 
     try:
-        upload_url, final_name = _unique_upload_path(folder_path, filename)
+        if if_exists == "skip":
+            final_name = filename
+            upload_url = (f"{GRAPH_BASE}/drives/{config.SHAREPOINT_DRIVE_ID}/root:{_q(f'{folder_path}/{filename}')}:/content"
+                          "?@microsoft.graph.conflictBehavior=fail")
+        else:
+            upload_url, final_name = _unique_upload_path(folder_path, filename)
         print(f"[sharepoint] Uploading {len(file_bytes)} bytes -> {folder_path}/{final_name}")
         up_resp = httpx.put(
             upload_url,
@@ -244,6 +257,9 @@ def save_media(
             headers={**_headers(), "Content-Type": "application/octet-stream"},
             timeout=120.0,
         )
+        if if_exists == "skip" and up_resp.status_code == 409:
+            print(f"[sharepoint] '{final_name}' is already in {folder_path}, not uploaded again.")
+            return ALREADY_EXISTS
         up_resp.raise_for_status()
         result = up_resp.json()
         web_url = result.get("webUrl", "")
@@ -256,7 +272,7 @@ def save_media(
 
         return web_url
     except Exception as e:
-        print(f"[sharepoint] ERROR uploading to SharePoint: {e}")
+        print(f"[sharepoint] ERROR uploading to SharePoint: {type(e).__name__} {getattr(getattr(e, 'response', None), 'status_code', '')}")
         return None
 
 
