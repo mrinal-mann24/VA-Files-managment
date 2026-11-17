@@ -160,6 +160,14 @@ def get_registered_group_id(client_id: str) -> str | None:
         return None
 
 
+def folder_name_for(row: dict) -> str:
+    """The ONE rule for a client's SharePoint folder name: the stored whatsapp_group_name, else client_name.
+    Never WhatsApp's current (live) group name: groups get renamed, and using the live name is what
+    created duplicate folders (e.g. "KRRD" and "KRRD - Virtual Accounting"). Live bot, backfill and
+    recovery all call this, so every file for a client lands in the same folder."""
+    return (row.get("whatsapp_group_name") or "").strip() or row.get("client_name")
+
+
 def _get_parent_name(parent_client_id: str | None) -> str | None:
     """
     Return the parent client's FOLDER name (its whatsapp_group_name, falling back
@@ -181,8 +189,7 @@ def _get_parent_name(parent_client_id: str | None) -> str | None:
         rows = resp.data or []
         if not rows:
             return None
-        row = rows[0]
-        return row.get("whatsapp_group_name") or row.get("client_name")
+        return folder_name_for(rows[0])
     except Exception as e:
         print(f"[db] ERROR fetching parent folder name: {e}")
         return None
@@ -227,8 +234,7 @@ def find_client_by_number(whatsapp_number: str) -> dict | None:
             if not _is_active(client.get("status")):
                 print(f"[db] Client '{client_name}' is INACTIVE (status={client.get('status')!r}) — skipping.")
                 return None
-            # folder_name = group name if we have it, else fall back to client_name
-            folder_name = client.get("whatsapp_group_name") or client_name
+            folder_name = folder_name_for(client)
             parent_name = _get_parent_name(client.get("parent_client_id"))
             print(f"[db] Number match: {candidate} -> '{client_name}' (folder: '{folder_name}', parent: '{parent_name}')")
             return {
@@ -272,19 +278,9 @@ def find_client_by_group(chat_id: str) -> dict | None:
         if not _is_active(row.get("status")):
             print(f"[db] Client '{row.get('client_name')}' is INACTIVE (status={row.get('status')!r}) — skipping.")
             return None
-        group_name = row.get("whatsapp_group_name") or ""
-        if not group_name:
-            fetched = fetch_group_name(group_id)
-            if fetched:
-                group_name = fetched
-                try:
-                    _supabase.table("clients").update(
-                        {"whatsapp_group_name": group_name}
-                    ).eq("client_id", row["client_id"]).execute()
-                    print(f"[db] Backfilled group name '{group_name}' for '{row['client_name']}'")
-                except Exception as e:
-                    print(f"[db] ERROR saving backfilled group name: {e}")
-        folder_name = group_name or row.get("client_name")
+        # A blank stored name is NOT filled from WhatsApp here: this client's files already live in the
+        # client_name folder, and switching to the WhatsApp name would start a second folder.
+        folder_name = folder_name_for(row)
         parent_name = _get_parent_name(row.get("parent_client_id"))
         print(f"[db] Group match: {group_id} -> '{row['client_name']}' (folder: '{folder_name}', parent: '{parent_name}')")
         return {

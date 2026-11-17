@@ -77,7 +77,7 @@ def linked_active_groups(only_group: str | None) -> list[dict]:
             "client_name": r["client_name"],
             "chat_id": f"{gid}@g.us",
             "group_id": gid,
-            "folder_name": r.get("whatsapp_group_name") or r["client_name"],
+            "folder_name": db.folder_name_for(r),
             "parent_name": db._get_parent_name(r.get("parent_client_id")),
         })
     return sorted(out, key=lambda g: g["client_name"].lower())

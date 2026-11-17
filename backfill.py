@@ -390,10 +390,15 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     # Add all group members to client_contacts with the client name.
     _add_group_members_as_contacts(chat_id, client["client_id"], client["client_name"], gm_phone)
 
+    # Folder = the client's stored folder name (db.folder_name_for), the same one the live bot writes to.
+    # Never WhatsApp's current group name: that is what created duplicate folders after group renames.
+    folder = client["folder_name"]
     # If this group belongs to a parent client, files go inside the parent's folder.
     parent_name = client.get("parent_name")
     if parent_name:
-        print(f"[backfill] Parent folder: '{parent_name}' -> sub-folder: '{group_name}'")
+        print(f"[backfill] Parent folder: '{parent_name}' -> sub-folder: '{folder}'")
+    elif folder != group_name:
+        print(f"[backfill] WhatsApp name '{group_name}' -> saving into the client's folder '{folder}'")
 
     messages = fetch_all_messages(chat_id, gm_phone)
     print(f"[backfill] {len(messages)} message(s) to process.")
@@ -401,7 +406,7 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
     # Fetch the group's existing notes.txt once. Each note line embeds the
     # message's own timestamp ("[<msg-ts>] <body>"), which is stable across
     # runs, so we can skip re-appending lines we already wrote on a prior run.
-    existing_notes = _fetch_existing_notes(group_name, parent_name)
+    existing_notes = _fetch_existing_notes(folder, parent_name)
 
     files_saved = 0
     notes_saved = 0
@@ -426,12 +431,12 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
 
             # Skip if this exact file is already in the folder (re-run safety).
             # Unlike the live bot, the backfill does NOT re-download duplicates.
-            if filename and _already_downloaded(group_name, filename, parent_name):
+            if filename and _already_downloaded(folder, filename, parent_name):
                 already_have += 1
                 continue
 
             media_url = _build_media_url(raw_path)
-            saved = storage.save_media(group_name, media_url, filename, parent_name, message_timestamp=timestamp)
+            saved = storage.save_media(folder, media_url, filename, parent_name, message_timestamp=timestamp)
             if saved:
                 files_saved += 1
             else:
@@ -456,7 +461,7 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
                 already_have += 1
                 continue
 
-            storage.save_text_note(group_name, note_text, parent_name)
+            storage.save_text_note(folder, note_text, parent_name)
             existing_notes += note_text  # keep in-memory copy current within this run
             notes_saved += 1
 
