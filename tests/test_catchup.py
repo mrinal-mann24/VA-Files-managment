@@ -80,6 +80,7 @@ class FakeClient:
 
 
 sp.httpx.Client = FakeClient
+config.DATE_FOLDERS_FROM = ""  # date folders are tested below; this check stays in the client folder on any day
 puts: list[str] = []
 sp.httpx.put = lambda url, **k: (puts.append(url), Resp(409))[1]
 out = sp.save_media("Alpha", "https://x/y", "bill.pdf", if_exists="skip")
