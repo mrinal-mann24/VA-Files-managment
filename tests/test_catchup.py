@@ -224,7 +224,8 @@ uploads: list[str] = []
 kb: list[dict] = []
 main.db.find_client_by_group = lambda chat_id: {"client_id": "c1", "client_name": "Alpha"}
 main.db.add_contact = lambda *a, **k: None
-main.db.log_upload = lambda **k: None
+logged: list[dict] = []
+main.db.log_upload = lambda **k: logged.append(k)
 main.db.get_va_for_client = lambda cid: None
 main.teams.notify = lambda **k: None
 main.storage.save_media = lambda folder, url, name, parent=None, **k: (uploads.append(name), "https://sp/x")[1]
@@ -243,6 +244,39 @@ live("T2", "918888888888", "ours.pdf", from_me=True)
 ok("live: a file from our own connected phone is not saved", uploads == [])
 live("T3", "918888888888", "bill.pdf")
 ok("live: a client file is saved", uploads == ["bill.pdf"])
+live("T4", "918888888888", "oct.pdf", body="October bill, please book it")
+ok("live: the text typed under a client file is logged as its caption", logged[-1]["caption"] == "October bill, please book it")
+
+# ---------------------------------------------------------------- caption column: insert, and fallback while it is missing
+inserted: list[dict] = []
+missing_column = {"on": True}
+
+
+class Ins:
+    def insert(self, row):
+        self.row = row
+        return self
+
+    def execute(self):
+        if missing_column["on"] and "caption" in self.row:
+            raise RuntimeError("Could not find the 'caption' column of 'document_uploads' in the schema cache")
+        inserted.append(self.row)
+
+        class R:
+            data = [{"upload_id": "u1"}]
+        return R()
+
+
+db._supabase.table = lambda name: Ins()
+db.insert_upload({"file_name": "a.pdf"}, "  please book  ")
+ok("no caption column yet: the file is still logged, without the caption", inserted == [{"file_name": "a.pdf"}])
+inserted.clear()
+missing_column["on"] = False
+db.insert_upload({"file_name": "a.pdf"}, "  please book  ")
+ok("with the column: the caption is trimmed and stored", inserted == [{"file_name": "a.pdf", "caption": "please book"}])
+inserted.clear()
+db.insert_upload({"file_name": "b.jpg"}, "   ")
+ok("a blank caption is not sent", inserted == [{"file_name": "b.jpg"}])
 
 print("ALL PASS" if all(res) else f"{res.count(False)} FAILED")
 sys.exit(0 if all(res) else 1)

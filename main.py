@@ -287,6 +287,7 @@ def _process_message(msg: dict, unique_id: str) -> dict:
             file_name=filename or "",
             file_type=message_type,
             file_size=file_size,
+            caption=body,  # the text typed under the file, shown on Shadow's Teams file card
         )
         # Look up assigned VA's Teams personal chat
         va = db.get_va_for_client(client["client_id"])

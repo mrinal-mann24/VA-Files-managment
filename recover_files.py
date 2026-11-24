@@ -171,7 +171,7 @@ def save_missing_file(g: dict, m: dict, name: str) -> str:
     if not web_url:
         return "failed"
     try:
-        db._supabase.table("document_uploads").insert({
+        db.insert_upload({
             "client_id": g["client_id"],
             "client_name": g["client_name"],
             "folder_name": g["folder_name"],
@@ -183,7 +183,7 @@ def save_missing_file(g: dict, m: dict, name: str) -> str:
             "file_size": mo.get("size") or 0,
             "uploaded_at": m.get("timestamp"),
             "notified": True,
-        }).execute()
+        }, m.get("body"))
     except Exception as e:
         # The file IS saved; only the log row is missing. Report it as saved so nobody retries an upload.
         print(f"    [recover] uploaded but not logged in document_uploads ({name}): {type(e).__name__}")

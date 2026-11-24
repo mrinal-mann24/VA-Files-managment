@@ -399,6 +399,25 @@ def add_contact(client_id: str, whatsapp_number: str, contact_name: str = None):
         print(f"[db] ERROR inserting contact: {e}")
 
 
+CAPTION_MAX = 2000
+
+
+def insert_upload(row: dict, caption: str | None):
+    """Insert one document_uploads row, with the file's caption when there is one. If the caption column is not
+    there yet (supabase/proposals/2026-11-24-document-uploads-caption.sql not run), insert again without it, so the
+    file is still logged."""
+    text = (caption or "").strip()[:CAPTION_MAX]
+    if not text:
+        return _supabase.table("document_uploads").insert(row).execute()
+    try:
+        return _supabase.table("document_uploads").insert({**row, "caption": text}).execute()
+    except Exception as e:
+        if "caption" not in str(e):
+            raise
+        print("[db] document_uploads.caption is missing; logged the file without its caption.")
+        return _supabase.table("document_uploads").insert(row).execute()
+
+
 def log_upload(
     client_id: str,
     client_name: str,
@@ -409,13 +428,15 @@ def log_upload(
     file_name: str,
     file_type: str,
     file_size: int,
+    caption: str = "",
 ) -> str | None:
     """
     Insert one row into document_uploads for every file saved.
+    caption: the text the sender typed under the file on WhatsApp (stored on the row so Shadow can show it).
     Returns the upload_id (uuid) or None on failure.
     """
     try:
-        resp = _supabase.table("document_uploads").insert({
+        row = {
             "client_id": client_id,
             "client_name": client_name,
             "folder_name": folder_name,
@@ -426,7 +447,8 @@ def log_upload(
             "file_type": file_type,
             "file_size": file_size,
             "notified": False,
-        }).execute()
+        }
+        resp = insert_upload(row, caption)
         upload_id = (resp.data or [{}])[0].get("upload_id")
         print(f"[db] Logged upload '{file_name}' for '{client_name}' (id={upload_id})")
         return upload_id
