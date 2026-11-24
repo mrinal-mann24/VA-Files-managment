@@ -120,6 +120,10 @@ MSGS = [
     {"unique_id": "C", "body": "Filed, ARN attached", "timestamp": "2026-11-17T01:02:00Z", "sender_phone": "919741428606",
      "media": {"path": "/x/arn.pdf", "mimetype": "application/pdf", "filename": "arn.pdf"}},
     {"unique_id": "D", "body": "", "timestamp": "2026-11-17T01:03:00Z", "media": {"path": "/x/old.jpg", "mimetype": "image/jpeg", "filename": "old.jpg"}},
+    {"unique_id": "E", "body": "", "timestamp": "2026-11-17T01:04:00Z", "sender_phone": "918888888888",
+     "media": {"path": "/x/bill.pdf", "mimetype": "application/pdf", "filename": "bill.pdf"}},
+    {"unique_id": "F", "body": "", "timestamp": "2026-11-17T01:05:00Z", "sender_phone": "918888888888", "from_me": True,
+     "media": {"path": "/x/recon.xlsx", "mimetype": "application/vnd.ms-excel", "filename": "recon.xlsx"}},
 ]
 calls = {"fetch": 0}
 
@@ -151,7 +155,7 @@ rf.backfill._already_downloaded = lambda folder, name, parent=None, ts=None: nam
 saved_msgs: list[dict] = []
 saved_files: list[tuple] = []
 db.save_message = lambda **k: (saved_msgs.append(k), "id")[1]
-outcomes = {"arn.pdf": "saved"}
+outcomes = {"bill.pdf": "saved"}
 rf.save_missing_file = lambda g, m, name: (saved_files.append((g["client_id"], name)), outcomes.get(name, "saved"))[1]
 sent: list[str] = []
 
@@ -174,10 +178,11 @@ s = catchup.run(48, apply=True, now=NOW)
 d = {k["unique_id"]: k for k in saved_msgs}
 ok("apply saves exactly the missing messages", set(d) == {"B", "C"} and s["messages_saved"] == 2)
 ok("team caption saved as outgoing, client text as incoming", d["C"]["direction"] == "outgoing" and d["B"]["direction"] == "incoming")
-ok("apply uploads only the file not in SharePoint", saved_files == [("c1", "arn.pdf")] and s["files_saved"] == 1)
+ok("apply uploads only the client file not in SharePoint", saved_files == [("c1", "bill.pdf")] and s["files_saved"] == 1)
+ok("team files (team number or our own phone) are never picked up", [m["unique_id"] for m in rf.media_messages(MSGS)] == ["D", "E"])
 
 saved_files.clear()
-outcomes["arn.pdf"] = "present"
+outcomes["bill.pdf"] = "present"
 s = catchup.run(48, apply=True, now=NOW)
 ok("'present' (live bot saved it meanwhile) is neither saved nor failed", (s["files_saved"], s["files_failed"]) == (0, 0))
 
@@ -213,6 +218,31 @@ class Req:
 r = asyncio.run(main.webhook(Req()))
 ok("a copy that arrives while the first is processing is skipped", r == {"status": "duplicate"})
 main._IN_FLIGHT.discard("BUSY")
+
+# ---------------------------------------------------------------- live bot: only client files are saved
+uploads: list[str] = []
+kb: list[dict] = []
+main.db.find_client_by_group = lambda chat_id: {"client_id": "c1", "client_name": "Alpha"}
+main.db.add_contact = lambda *a, **k: None
+main.db.log_upload = lambda **k: None
+main.db.get_va_for_client = lambda cid: None
+main.teams.notify = lambda **k: None
+main.storage.save_media = lambda folder, url, name, parent=None, **k: (uploads.append(name), "https://sp/x")[1]
+main._save_to_knowledge_base = lambda client, chat_id, sender, body, msg, uid: kb.append({"uid": uid, "body": body})
+
+
+def live(uid, sender, name, body="", from_me=False):
+    return main._process_message({"chat_id": "g1@g.us", "sender_phone": sender, "body": body, "from_me": from_me,
+                                  "message_type": "document", "timestamp": "2026-11-24T05:00:00Z",
+                                  "media": {"path": "/storage/" + name, "mimetype": "application/pdf", "filename": name}}, uid)
+
+
+r = live("T1", "919741428606", "recon.pdf", body="Here is the recon")
+ok("live: a file from a team number is not saved, but its caption is kept", r == {"status": "ok"} and uploads == [] and kb == [{"uid": "T1", "body": "Here is the recon"}])
+live("T2", "918888888888", "ours.pdf", from_me=True)
+ok("live: a file from our own connected phone is not saved", uploads == [])
+live("T3", "918888888888", "bill.pdf")
+ok("live: a client file is saved", uploads == ["bill.pdf"])
 
 print("ALL PASS" if all(res) else f"{res.count(False)} FAILED")
 sys.exit(0 if all(res) else 1)

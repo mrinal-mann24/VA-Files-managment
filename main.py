@@ -232,6 +232,14 @@ def _process_message(msg: dict, unique_id: str) -> dict:
     # ------------------------------------------------------------------ #
     # Step 4 — save the message / file                                    #
     # ------------------------------------------------------------------ #
+    if has_media and db.is_team_sender(msg):
+        # Files our team posts (recons, invoices, proposals) are not saved: the client folder holds only what
+        # the client sent. The caption is still kept as our message, so Shadow sees "here is the recon".
+        print(f"[main] File from our team in '{client_name}' — not saved.")
+        if body.strip():
+            _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
+        return {"status": "ok"}
+
     if has_media:
         # Any message carrying a media object is an attachment worth saving,
         # regardless of its message_type string. WhatsApp payment cards,

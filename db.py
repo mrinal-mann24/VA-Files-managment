@@ -75,6 +75,13 @@ def is_team_number(number: str | None) -> bool:
     return bool(n) and n in team_numbers()
 
 
+def is_team_sender(msg: dict) -> bool:
+    """True when a Periskope message was posted by our team: from a connected Periskope phone (from_me) or a
+    team number. Files from the team are not saved to SharePoint: client folders hold only what the client sent."""
+    sender = msg.get("sender_phone") or msg.get("author") or ""
+    return bool(msg.get("from_me")) or is_team_number(sender)
+
+
 def is_va_group_name(name: str | None) -> bool:
     return any(p.search(name or "") for p in _CLIENT_GROUP_PATTERNS)
 

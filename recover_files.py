@@ -131,8 +131,12 @@ def logged_files(group_id: str) -> set[str]:
 
 
 def media_messages(msgs: list[dict]) -> list[dict]:
-    """Messages that carry a downloadable file."""
-    return [m for m in msgs if (m.get("media") or {}).get("path") or (m.get("media") or {}).get("url")]
+    """Messages that carry a downloadable file sent by the client. Files our team posted are left out, the same
+    rule as the live bot (main.py), so catch-up and recovery never save them either."""
+    return [
+        m for m in msgs
+        if ((m.get("media") or {}).get("path") or (m.get("media") or {}).get("url")) and not db.is_team_sender(m)
+    ]
 
 
 def find_missing_files(g: dict, media: list[dict]) -> tuple[list[tuple[dict, str, str]], int, int]:

@@ -368,6 +368,10 @@ def process_group(chat_id: str, group_name: str, gm_phone: str = None):
         # contacts, unknown types). Mirrors the live bot in main.py so live and
         # historical capture never disagree.
         if media_obj and (media_obj.get("path") or media_obj.get("url")):
+            if db.is_team_sender(msg):
+                # Same rule as the live bot: files our team posted are not saved to the client folder.
+                skipped += 1
+                continue
             raw_path = media_obj.get("path") or media_obj.get("url") or ""
 
             mimetype = media_obj.get("mimetype") or media_obj.get("mime_type") or ""
