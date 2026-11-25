@@ -234,10 +234,10 @@ def _process_message(msg: dict, unique_id: str) -> dict:
     # ------------------------------------------------------------------ #
     if has_media and db.is_team_sender(msg):
         # Files our team posts (recons, invoices, proposals) are not saved: the client folder holds only what
-        # the client sent. The caption is still kept as our message, so Shadow sees "here is the recon".
+        # the client sent. The message is still kept ("[File shared: <name>]" plus any caption), so Shadow sees
+        # that we delivered it even when there is no caption.
         print(f"[main] File from our team in '{client_name}' — not saved.")
-        if body.strip():
-            _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
+        _save_to_knowledge_base(client, chat_id, sender_phone, naming.message_text(msg), msg, unique_id)
         return {"status": "ok"}
 
     if has_media:
@@ -271,10 +271,9 @@ def _process_message(msg: dict, unique_id: str) -> dict:
                             filename=filename, reason="download or SharePoint upload failed (see the log above)")
             return {"status": "failed", "reason": "file not saved"}
 
-        # The caption on a photo or document is real text ("invoice for Oct, please book it"): keep it
-        # in the knowledge base too, not only the file.
-        if body.strip():
-            _save_to_knowledge_base(client, chat_id, sender_phone, body, msg, unique_id)
+        # Keep the message in the knowledge base too: "[File shared: <name>]" plus the caption ("invoice for Oct,
+        # please book it"), so a file with no caption still reaches the ticket timeline.
+        _save_to_knowledge_base(client, chat_id, sender_phone, naming.message_text(msg), msg, unique_id)
 
         # Log to Supabase
         db.log_upload(

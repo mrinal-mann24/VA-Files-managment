@@ -169,15 +169,19 @@ teams._send_teams_message = fake_send
 NOW = datetime(2026, 11, 17, 3, 0, tzinfo=timezone.utc)
 
 s = catchup.run(48, apply=False, now=NOW)
-ok("dry run finds 2 missing messages and 1 missing file", (s["messages_missing"], s["files_missing"]) == (2, 1))
+ok("dry run finds 5 missing messages (2 texts + 3 caption-less files) and 1 missing file",
+   (s["messages_missing"], s["files_missing"]) == (5, 1))
 ok("dry run writes nothing", saved_msgs == [] and saved_files == [])
 ok("a failing group is retried 4 times, then reported, others still run", calls["fetch"] == 5 and len(s["errors"]) == 1)
 ok("error text sent to Teams has no URL (exception type only)", s["errors"] == ["Beta: RuntimeError"])
 
 s = catchup.run(48, apply=True, now=NOW)
 d = {k["unique_id"]: k for k in saved_msgs}
-ok("apply saves exactly the missing messages", set(d) == {"B", "C"} and s["messages_saved"] == 2)
+ok("apply saves exactly the missing messages", set(d) == {"B", "C", "D", "E", "F"} and s["messages_saved"] == 5)
 ok("team caption saved as outgoing, client text as incoming", d["C"]["direction"] == "outgoing" and d["B"]["direction"] == "incoming")
+ok("catch-up stores files as '[File shared: name]' plus the caption",
+   d["C"]["body"] == "[File shared: arn.pdf] Filed, ARN attached" and d["E"]["body"] == "[File shared: bill.pdf]")
+ok("our caption-less file from our own phone is saved as outgoing", d["F"]["direction"] == "outgoing" and d["F"]["body"] == "[File shared: recon.xlsx]")
 ok("apply uploads only the client file not in SharePoint", saved_files == [("c1", "bill.pdf")] and s["files_saved"] == 1)
 ok("team files (team number or our own phone) are never picked up", [m["unique_id"] for m in rf.media_messages(MSGS)] == ["D", "E"])
 
@@ -239,13 +243,35 @@ def live(uid, sender, name, body="", from_me=False):
 
 
 r = live("T1", "919741428606", "recon.pdf", body="Here is the recon")
-ok("live: a file from a team number is not saved, but its caption is kept", r == {"status": "ok"} and uploads == [] and kb == [{"uid": "T1", "body": "Here is the recon"}])
-live("T2", "918888888888", "ours.pdf", from_me=True)
+ok("live: a file from a team number is not saved, but the message is kept with its caption",
+   r == {"status": "ok"} and uploads == [] and kb == [{"uid": "T1", "body": "[File shared: recon.pdf] Here is the recon"}])
+live("T2", "918888888888", "ICICI letter Signed.pdf", from_me=True)
 ok("live: a file from our own connected phone is not saved", uploads == [])
+ok("live: our file with NO caption still reaches the timeline (Forelife, 25 Nov)",
+   kb[-1] == {"uid": "T2", "body": "[File shared: ICICI letter Signed.pdf]"})
 live("T3", "918888888888", "bill.pdf")
 ok("live: a client file is saved", uploads == ["bill.pdf"])
+ok("live: a client file with no caption is on the timeline too", kb[-1] == {"uid": "T3", "body": "[File shared: bill.pdf]"})
 live("T4", "918888888888", "oct.pdf", body="October bill, please book it")
 ok("live: the text typed under a client file is logged as its caption", logged[-1]["caption"] == "October bill, please book it")
+ok("live: the timeline line has the file name and the caption", kb[-1]["body"] == "[File shared: oct.pdf] October bill, please book it")
+
+# ---------------------------------------------------------------- message text rule (shared by live bot and catch-up)
+ok("text: a plain message is unchanged", naming.message_text({"body": "  hello  "}) == "hello")
+ok("text: no body and no file is empty", naming.message_text({"body": None}) == "")
+ok("text: a file with no name gets the message-time name",
+   naming.message_text({"media": {"path": "/x/", "mimetype": "application/pdf"}, "timestamp": "2026-11-25T07:30:00Z"})
+   == "[File shared: file_20261125_073000.pdf]")
+real_hashes = catchup.existing_hashes
+catchup.existing_hashes = lambda uids: {"HAVE"}
+picked = catchup.missing_messages([
+    {"unique_id": "F1", "body": None, "media": {"filename": "signed.pdf", "mimetype": "application/pdf"}, "timestamp": "2026-11-25T07:30:00Z"},
+    {"unique_id": "HAVE", "body": "already saved", "timestamp": "2026-11-25T07:00:00Z"},
+    {"unique_id": "E1", "body": "   ", "timestamp": "2026-11-25T07:40:00Z"},
+])
+ok("catch-up: a missed file with no caption is picked up; saved and empty messages are not",
+   [m["unique_id"] for m in picked] == ["F1"])
+catchup.existing_hashes = real_hashes
 
 # ---------------------------------------------------------------- caption column: insert, and fallback while it is missing
 inserted: list[dict] = []

@@ -72,6 +72,22 @@ def resolve_filename(media_obj: dict, mimetype: str, timestamp: str | None) -> s
     return ensure_ext(f"file_{ts}" if ts else "file", mimetype)
 
 
+def message_text(msg: dict) -> str:
+    """
+    Text kept in client_messages for one WhatsApp message (live bot and catch-up use this same rule).
+    A file becomes "[File shared: <name>]" followed by its caption, so a file sent with no caption still shows on
+    the ticket timeline (for example our signed PDF closing a request). Whether the file itself is saved to
+    SharePoint is decided elsewhere; our team's files never are.
+    """
+    body = (msg.get("body") or "").strip()
+    media = msg.get("media") or {}
+    if not media:
+        return body
+    name = resolve_filename(media, media.get("mimetype", ""), msg.get("timestamp"))
+    marker = f"[File shared: {name}]"
+    return f"{marker} {body}" if body else marker
+
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 

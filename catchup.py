@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 import db
+import naming
 import recover_files as rf
 import teams
 
@@ -60,11 +61,11 @@ def existing_hashes(uids: list[str]) -> set[str]:
 
 
 def missing_messages(msgs: list[dict]) -> list[dict]:
-    """Messages with text (or a caption) that client_messages does not have yet, oldest first."""
+    """Messages with text, a caption or a file that client_messages does not have yet, oldest first."""
     cand: dict[str, dict] = {}
     for m in msgs:
         uid = m.get("unique_id") or m.get("message_id")
-        if uid and (m.get("body") or "").strip():
+        if uid and naming.message_text(m):
             cand[uid] = m
     have = existing_hashes(list(cand))
     return sorted((m for u, m in cand.items() if u not in have), key=lambda x: x.get("timestamp") or "")
@@ -77,7 +78,7 @@ def save_message(g: dict, m: dict) -> bool:
         client_id=g["client_id"],
         whatsapp_group_id=g["chat_id"],
         sender_phone=sender,
-        body=m.get("body") or "",
+        body=naming.message_text(m),
         message_timestamp=m.get("timestamp") or "",
         unique_id=m.get("unique_id") or m.get("message_id"),
         direction="outgoing" if outgoing else "incoming",
