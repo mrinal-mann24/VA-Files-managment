@@ -404,7 +404,7 @@ CAPTION_MAX = 2000
 
 def insert_upload(row: dict, caption: str | None):
     """Insert one document_uploads row, with the file's caption when there is one. If the caption column is not
-    there yet (supabase/proposals/2026-11-24-document-uploads-caption.sql not run), insert again without it, so the
+    there (Shadow's supabase/applied/2026-11-24-document-uploads-caption.sql, applied 24 Nov 2026, was rolled back), insert again without it, so the
     file is still logged."""
     text = (caption or "").strip()[:CAPTION_MAX]
     if not text:
